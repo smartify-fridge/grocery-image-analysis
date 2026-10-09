@@ -1,8 +1,10 @@
 import os
+from sklearn.utils.class_weight import compute_class_weight
 from keras.optimizers import SGD, Adam
-from keras.callbacks import EarlyStopping
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from keras.models import load_model
 import argparse
+import numpy as np
 from lenet import LeNet
 from mobilenet import MobileNet
 from data_grocery import get_data, prepare_data, get_fruits360, prepare_fruits360
@@ -71,11 +73,16 @@ def train_mobilenet(args, train, val, img_rows, img_cols, channels, batch_size, 
               validation_data=val, callbacks=[early_stop], verbose=1)
 
     print("Phase 2: fine-tuning the top ImageNet layers...")
-    MobileNet.unfreeze(base, 40)
+    MobileNet.unfreeze(base, 80)
     model.compile(optimizer=Adam(learning_rate=1e-5), loss="categorical_crossentropy", metrics=["accuracy"])
     early_stop = EarlyStopping(monitor="val_loss", patience=6, restore_best_weights=True)
-    model.fit(train[0], train[1], batch_size=batch_size, epochs=30,
-              validation_data=val, callbacks=[early_stop], verbose=1)
+    reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.3, patience=2, min_lr=1e-7, verbose=1)
+    train_labels = np.argmax(train[1], axis=1)
+    class_weights = compute_class_weight(class_weight="balanced", classes=np.unique(train_labels), y=train_labels)
+    class_weights = dict(enumerate(class_weights))
+    model.fit(train[0], train[1], batch_size=batch_size, epochs=40,
+              validation_data=val, callbacks=[early_stop, reduce_lr], 
+              class_weight=class_weights, verbose=1)
     return model
 
 
@@ -103,7 +110,7 @@ def main():
     use_mobilenet = args["model"] == "mobilenet"
 
     # MobileNetV2's ImageNet weights come in fixed sizes; 160 balances accuracy against memory and speed
-    img_rows = img_cols = 160 if use_mobilenet else 64
+    img_rows = img_cols = 192 if use_mobilenet else 64
     prefix = "grocery_mobilenet" if use_mobilenet else "grocery"
     weights_path = f"{prefix}_coarse.weights.h5" if coarse else f"{prefix}_fine.weights.h5"
 
