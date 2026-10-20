@@ -1,2 +1,9 @@
 mlenv/
 .venv/
+
+__pycache__/
+*.pyc
+runs/
+food_ingredient_51/
+ingredient_dataset/
+yolo11n.pt
