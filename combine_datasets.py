@@ -38,6 +38,84 @@ ALIASES = {
     "spiny gourd": "Spiny Gourd",
 }
 
+# Broad fridge-level classes and the canonical labels merged into each.
+# Labels not listed here keep their own name as a class.
+BROAD_CLASSES = {
+    # Fruit
+    "Apple": ["Apple Braeburn", "Apple Granny Smith", "Pink-Lady", "Royal-Gala"],
+    "Pear": ["Pear", "Conference", "Kaiser"],
+    "Mandarin": ["Clementine", "Mandarine", "Satsumas", "Tangelo"],
+    "Grapefruit": ["Red-Grapefruit", "Pomelo Sweetie"],
+    "Berries": ["Blueberry", "Raspberry", "Blackberry", "Mulberry", "Redcurrant"],
+    "Stone Fruit": ["Peach", "Nectarine", "Apricot", "Plum"],
+    "Melon": ["Cantaloupe", "Galia-Melon", "Honeydew-Melon"],
+    "Dragon Fruit": ["Dragon Fruit", "Pitahaya Red"],
+    "Passion Fruit": ["Passion Fruit", "Maracuja"],
+    # Vegetables
+    "Tomato": ["Tomato", "Regular-Tomato", "Beef-Tomato", "Vine-Tomato", "Tomato Cherry"],
+    "Bell Pepper": ["Bell Pepper", "Orange-Bell-Pepper", "Paprika"],
+    "Chili Pepper": ["Chili Pepper", "Jalapeno"],
+    "Potato": ["Potato White", "Floury-Potato", "Solid-Potato"],
+    "Sweet Potato": ["Sweet-Potato"],
+    "Onion": ["Onion Red", "Yellow-Onion"],
+    "Carrot": ["Carrots"],
+    "Beet": ["Beetroot", "Red-Beet"],
+    "Mushroom": ["Brown-Cap-Mushroom", "Mushroom Champignon"],
+    "Squash": ["Squash", "Pumpkin"],
+    "Leafy Greens": ["Spinach", "Kale", "Chard", "Amaranth"],
+    "Fresh Herbs": ["Basil", "Cilantro", "Dill", "Mint", "Oregano", "Parsley", "Rosemary", "Thyme"],
+    "Beans & Peas": ["Bean Pod", "Peas", "Soybeans"],
+    "Other Vegetable": [
+        "Fennel", "Okra", "Parsnip", "Turnip", "Kohlrabi", "Bitter Gourd",
+        "Bottle Gourd", "Ridge Gourd", "Spiny Gourd", "Sponge Gourd",
+    ],
+    # Meat and seafood
+    "Red Meat": ["Beef Steak", "Veal Cutlet", "Pork Chop", "Lamb Shank", "Goat Meat"],
+    "Poultry": ["Chicken Breast", "Turkey Breast", "Duck Breast"],
+    "Bacon & Deli Meat": ["Bacon", "Ham", "Prosciutto"],
+    "Fish": [
+        "Cod Fillet", "Herring Fillet", "Mackerel Fillet",
+        "Salmon Fillet", "Sardine Fillet", "Tuna Steak",
+    ],
+    "Shellfish & Seafood": [
+        "Clam Meat", "Crab Meat", "Lobster Tail", "Scallop",
+        "Shrimp", "Octopus", "Squid", "Caviar",
+    ],
+    # Dairy and drinks
+    "Milk": [
+        "Arla-Ecological-Medium-Fat-Milk", "Arla-Lactose-Medium-Fat-Milk",
+        "Arla-Medium-Fat-Milk", "Arla-Standard-Milk", "Arla-Sour-Milk",
+        "Garant-Ecological-Medium-Fat-Milk", "Garant-Ecological-Standard-Milk",
+    ],
+    "Plant Milk": ["Alpro-Fresh-Soy-Milk", "Alpro-Shelf-Soy-Milk", "Oatly-Oat-Milk"],
+    "Yogurt": [
+        "Alpro-Blueberry-Soyghurt", "Alpro-Vanilla-Soyghurt",
+        "Arla-Mild-Vanilla-Yoghurt", "Arla-Natural-Mild-Low-Fat-Yoghurt",
+        "Arla-Natural-Yoghurt", "Oatly-Natural-Oatghurt", "Valio-Vanilla-Yoghurt",
+        "Yoggi-Strawberry-Yoghurt", "Yoggi-Vanilla-Yoghurt",
+    ],
+    "Sour Cream": ["Arla-Sour-Cream", "Arla-Ecological-Sour-Cream"],
+    "Juice": [
+        "Bravo-Apple-Juice", "Bravo-Orange-Juice", "God-Morgon-Apple-Juice",
+        "God-Morgon-Orange-Juice", "God-Morgon-Orange-Red-Grapefruit-Juice",
+        "God-Morgon-Red-Grapefruit-Juice", "Tropicana-Apple-Juice",
+        "Tropicana-Golden-Grapefruit", "Tropicana-Juice-Smooth",
+        "Tropicana-Mandarin-Morning",
+    ],
+}
+
+LABEL_TO_BROAD = {
+    label: broad
+    for broad, labels in BROAD_CLASSES.items()
+    for label in labels
+}
+
+# Pantry items that are not kept in a fridge.
+DROPPED_CLASSES = {
+    "Cardamom", "Cinnamon", "Clove", "Cumin", "Nutmeg", "Turmeric", "Honey",
+    "Almonds", "Caju Seed", "Chestnut", "Hazelnut", "Nut", "Pistachio", "Walnut",
+}
+
 SPLIT_NAMES = {
     "train": "train",
     "training": "train",
@@ -52,6 +130,17 @@ def canonical_label(label):
     """Normalize spelling/case and apply explicit aliases."""
     label = " ".join(label.replace("_", " ").strip().split())
     return ALIASES.get(label.casefold(), label.title())
+
+def apply_broad_classes(records):
+    """Drop pantry classes and merge the rest into broad classes."""
+    kept = []
+    for record in records:
+        if record["label"] in DROPPED_CLASSES:
+            continue
+        record["label"] = LABEL_TO_BROAD.get(record["label"], record["label"])
+        kept.append(record)
+    print(f"\nDropped {len(records) - len(kept)} pantry images")
+    return kept
 
 def image_files(folder):
     if not folder.exists():
@@ -339,6 +428,7 @@ def main():
             "No images found. Check the dataset paths at the top of this file."
         )
 
+    records = apply_broad_classes(records)
     records = assign_splits(records, rng)
 
     # Remove exact duplicate files by content hash, keeping one copy.
