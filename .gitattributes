@@ -1,3 +1,5 @@
 combined_dataset/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 combined_dataset/**/*.jpeg filter=lfs diff=lfs merge=lfs -text
 combined_dataset/**/*.png filter=lfs diff=lfs merge=lfs -text
+*.h5 filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
