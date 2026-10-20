@@ -3,6 +3,7 @@ import os
 import kaggle
 import cv2
 from tensorflow.keras.utils import to_categorical
+import kagglehub
 
 # checks if data set path exists and downloads it if path doesn't exist yet
 # prints a statement to update user regarding status
@@ -72,3 +73,70 @@ def prepare_data(train_dir, test_dir, im_row, im_col):
     test_labels = labels_to_onehot(test_labels, label_map)
     
     return train_data, train_labels, test_data, test_labels, label_map 
+
+
+def get_ingredient_datasets():
+    """Download both additional ingredient image datasets."""
+
+    datasets = {
+        "ingredient": "keno31/ingredient-dataset",
+        "food_ingredient_51": "sunnyagarwal427444/food-ingredient-dataset-51",
+    }
+
+    paths = {}
+
+    for name, dataset_id in datasets.items():
+        print(f"\nDownloading/checking {dataset_id}...")
+
+        path = kagglehub.dataset_download(dataset_id)
+        paths[name] = path
+
+        print(f"{name} dataset path: {path}")
+
+    return paths
+
+
+def inspect_dataset(path, max_depth=3):
+    """Print the downloaded directory structure and image counts."""
+
+    image_extensions = {
+        ".jpg", ".jpeg", ".png", ".bmp", ".webp"
+    }
+
+    print(f"\nInspecting: {path}")
+
+    if not os.path.isdir(path):
+        print("Dataset directory not found.")
+        return
+
+    total_images = 0
+
+    for root, dirs, files in os.walk(path):
+        depth = os.path.relpath(root, path).count(os.sep)
+
+        if depth >= max_depth:
+            dirs[:] = []
+
+        images = [
+            f for f in files
+            if os.path.splitext(f)[1].lower() in image_extensions
+        ]
+
+        total_images += len(images)
+
+        if depth < max_depth or images:
+            print(
+                f"{os.path.relpath(root, path)}"
+                f" | subfolders={len(dirs)}"
+                f" | images={len(images)}"
+            )
+
+    print(f"Total images found: {total_images}")
+
+
+if __name__ == "__main__":
+    dataset_paths = get_ingredient_datasets()
+
+    for name, path in dataset_paths.items():
+        print(f"\n{'=' * 50}\n{name}")
+        inspect_dataset(path)

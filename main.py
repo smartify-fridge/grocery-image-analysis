@@ -7,7 +7,9 @@ import argparse
 import numpy as np
 from lenet import LeNet
 from mobilenet import MobileNet
-from data_grocery import get_data, prepare_data, get_fruits360, prepare_fruits360
+from data_grocery import get_fruits360, prepare_fruits360
+from data_combined import prepare_combined_data
+from keras.utils import load_img, img_to_array
 
 PRETRAINED_PATH = "fruits360_pretrain.keras"
 
@@ -27,7 +29,7 @@ def pretrain(img_rows, img_cols, channels, batch_size):
     print(f"Saving pretrained model to {PRETRAINED_PATH}...")
     model.save(PRETRAINED_PATH)
 
-
+"""
 # trains LeNet on the grocery data, starting from the Fruits-360 pretrained layers if they exist
 def train_lenet(args, train, val, img_rows, img_cols, channels, batch_size, weights_path):
     num_classes = train[1].shape[1]
@@ -52,8 +54,27 @@ def train_lenet(args, train, val, img_rows, img_cols, channels, batch_size, weig
     model.fit(train[0], train[1], batch_size=batch_size, epochs=50,
               validation_data=val, callbacks=[early_stop], verbose=1)
     return model
+"""
+def train_lenet(args, train_ds, val_ds, num_classes, img_rows, img_cols, channels, weights_path):
+    print("Building LeNet model...")
+    model = LeNet.build(channels, img_rows, img_cols, num_classes)
 
+    if args["load_model"] == 1:
+        print("Loading saved model weights...")
+        model.load_weights(weights_path)
+    elif os.path.exists(PRETRAINED_PATH) and args["scratch"] != 1:
+        print(f"Starting from Fruits-360 pretrained layers in {PRETRAINED_PATH}...")
+        LeNet.transfer_weights(load_model(PRETRAINED_PATH), model)
 
+    model.compile(optimizer=SGD(learning_rate=0.01, momentum=0.9), loss="categorical_crossentropy", metrics=["accuracy"])
+    early_stop = EarlyStopping(monitor="val_loss", patience=6, restore_best_weights=True)
+
+    print("Training LeNet...")
+    model.fit(train_ds, epochs=50, validation_data=val_ds, callbacks=[early_stop], verbose=1)
+    
+    return model
+
+"""
 # trains MobileNetV2 in two phases:
 # 1. the ImageNet layers stay frozen and only the new classifier learns
 # 2. the top of the ImageNet layers is unfrozen and fine-tuned with a much smaller learning rate
@@ -84,8 +105,86 @@ def train_mobilenet(args, train, val, img_rows, img_cols, channels, batch_size, 
               validation_data=val, callbacks=[early_stop, reduce_lr], 
               class_weight=class_weights, verbose=1)
     return model
+"""
+def train_mobilenet(args, train_ds, val_ds, num_classes, img_rows, img_cols, channels, weights_path):
+    print("Building MobileNetV2 model...")
+    model, base = MobileNet.build(channels, img_rows, img_cols, num_classes)
+
+    if args["load_model"] == 1:
+        print("Loading saved model weights...")
+        model.load_weights(weights_path)
+
+    print("Phase 1: training the classifier on frozen ImageNet features...")
+    model.compile(optimizer=Adam(learning_rate=1e-3), loss="categorical_crossentropy", metrics=["accuracy"])
+    early_stop = EarlyStopping(monitor="val_loss", min_delta=0.001, patience=4, restore_best_weights=True)
+    model.fit(train_ds, epochs=15, validation_data=val_ds, callbacks=[early_stop], verbose=1)
+
+    print("Phase 2: fine-tuning the top MobileNetV2 layers...")
+    MobileNet.unfreeze(base, 80)
+    model.compile(optimizer=Adam(learning_rate=1e-5), loss="categorical_crossentropy", metrics=["accuracy"])
+    early_stop = EarlyStopping(monitor="val_loss", patience=6, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.3, patience=2, min_lr=1e-7, verbose=1)
+    model.fit(train_ds, epochs=40, validation_data=val_ds, callbacks=[early_stop, reduce_lr], verbose=1)
+
+    return model
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--model", choices=["lenet", "mobilenet"], default="lenet")
+    parser.add_argument("-l", "--load-model", type=int, choices=[0, 1], default=0)
+    parser.add_argument("-c", "--coarse", type=int, choices=[0, 1], default=0)
+    parser.add_argument("-p", "--pretrain", type=int, choices=[0, 1], default=0)
+    parser.add_argument("-s", "--scratch", type=int, choices=[0, 1], default=0)
+    args = parser.parse_args()
+
+    # Image size for each model
+    img_rows = 192 if args.model == "mobilenet" else 64
+    img_cols = img_rows
+    batch_size = 32
+
+    # Use weights for the combined dataset
+    if args.model == "mobilenet":
+        weights_path = "combined_mobilenet.weights.h5"
+    else:
+        weights_path = "combined.weights.h5"
+
+    # Load the existing train/validation/test splits.
+    # This also updates class_names.json.
+    train_ds, val_ds, test_ds, label_map, train_counts = (prepare_combined_data(img_rows=img_rows, img_cols=img_cols, batch_size=batch_size))
+    num_classes = len(label_map)
+
+    print(f"Model: {args.model}")
+    print(f"Number of classes: {num_classes}")
+    print(f"Training class mapping saved to class_names.json")
+    print(f"Weights file: {weights_path}")
+
+    # Train the selected model
+    if args.model == "lenet":
+        model = train_lenet(vars(args), train_ds, val_ds, num_classes, img_rows, img_cols, channels=3, weights_path=weights_path)
+
+    else:
+        if args.pretrain:
+            parser.error(
+                "Fruits-360 pretraining is only supported for LeNet."
+            )
+
+        model = train_mobilenet(vars(args), train_ds, val_ds, num_classes, img_rows, img_cols, channels=3, weights_path=weights_path)
+
+    # Evaluate on the existing test split
+    test_loss, test_accuracy = model.evaluate(test_ds)
+
+    print(f"Test loss: {test_loss:.4f}")
+    print(f"Test accuracy: {test_accuracy:.4%}")
+
+    # Save the trained weights
+    model.save_weights(weights_path)
+    print(f"Saved weights to {weights_path}")
 
 
+if __name__ == "__main__":
+    main()
+
+"""
 def main():
     # parameters for training
     # batch size is how many images are processed per training step
@@ -106,6 +205,7 @@ def main():
     ap.add_argument("-s", "--scratch", type=int, default=0,
                     help="lenet only: 1 to ignore the Fruits-360 pretrained model and train from scratch")
     args = vars(ap.parse_args())
+
     coarse = args["coarse"] == 1
     use_mobilenet = args["model"] == "mobilenet"
 
@@ -133,10 +233,10 @@ def main():
     print("Evaluating the model...")
     loss, accuracy = model.evaluate(test_data, test_labels, batch_size=batch_size)
     print(f"Test Loss: {loss}, Test Accuracy: {accuracy}")
-
-    # save model weights
+   
     print("Saving model weights...")
     model.save_weights(weights_path)
 
 if __name__ == '__main__':
     main()
+"""
