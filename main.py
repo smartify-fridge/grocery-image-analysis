@@ -2,6 +2,7 @@ import os
 from sklearn.utils.class_weight import compute_class_weight
 from keras.optimizers import SGD, Adam
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from keras.losses import CategoricalCrossentropy
 from keras.models import load_model
 import argparse
 import numpy as np
@@ -106,7 +107,17 @@ def train_mobilenet(args, train, val, img_rows, img_cols, channels, batch_size, 
               class_weight=class_weights, verbose=1)
     return model
 """
-def train_mobilenet(args, train_ds, val_ds, num_classes, img_rows, img_cols, channels, weights_path):
+# weights rare classes up and common ones down so small classes (e.g. Ginger) aren't drowned out;
+# the square root softens the "balanced" weights, which would otherwise reach ~50x for the rarest classes
+def get_class_weights(label_map, train_counts):
+    total = sum(train_counts.values())
+    num_classes = len(label_map)
+    return {
+        index: float(np.sqrt(total / (num_classes * train_counts[name])))
+        for name, index in label_map.items()
+    }
+
+def train_mobilenet(args, train_ds, val_ds, num_classes, img_rows, img_cols, channels, weights_path, class_weights):
     print("Building MobileNetV2 model...")
     model, base = MobileNet.build(channels, img_rows, img_cols, num_classes)
 
@@ -114,17 +125,22 @@ def train_mobilenet(args, train_ds, val_ds, num_classes, img_rows, img_cols, cha
         print("Loading saved model weights...")
         model.load_weights(weights_path)
 
+    # label smoothing keeps the model from being overconfident on noisy labels (e.g. Open Images crops)
+    loss = CategoricalCrossentropy(label_smoothing=0.1)
+
     print("Phase 1: training the classifier on frozen ImageNet features...")
-    model.compile(optimizer=Adam(learning_rate=1e-3), loss="categorical_crossentropy", metrics=["accuracy"])
+    model.compile(optimizer=Adam(learning_rate=1e-3), loss=loss, metrics=["accuracy"])
     early_stop = EarlyStopping(monitor="val_loss", min_delta=0.001, patience=4, restore_best_weights=True)
-    model.fit(train_ds, epochs=15, validation_data=val_ds, callbacks=[early_stop], verbose=1)
+    model.fit(train_ds, epochs=15, validation_data=val_ds, callbacks=[early_stop],
+              class_weight=class_weights, verbose=1)
 
     print("Phase 2: fine-tuning the top MobileNetV2 layers...")
     MobileNet.unfreeze(base, 80)
-    model.compile(optimizer=Adam(learning_rate=1e-5), loss="categorical_crossentropy", metrics=["accuracy"])
+    model.compile(optimizer=Adam(learning_rate=1e-5), loss=loss, metrics=["accuracy"])
     early_stop = EarlyStopping(monitor="val_loss", patience=6, restore_best_weights=True)
     reduce_lr = ReduceLROnPlateau(monitor="val_loss", factor=0.3, patience=2, min_lr=1e-7, verbose=1)
-    model.fit(train_ds, epochs=40, validation_data=val_ds, callbacks=[early_stop, reduce_lr], verbose=1)
+    model.fit(train_ds, epochs=40, validation_data=val_ds, callbacks=[early_stop, reduce_lr],
+              class_weight=class_weights, verbose=1)
 
     return model
 
@@ -168,7 +184,9 @@ def main():
                 "Fruits-360 pretraining is only supported for LeNet."
             )
 
-        model = train_mobilenet(vars(args), train_ds, val_ds, num_classes, img_rows, img_cols, channels=3, weights_path=weights_path)
+        class_weights = get_class_weights(label_map, train_counts)
+        model = train_mobilenet(vars(args), train_ds, val_ds, num_classes, img_rows, img_cols, channels=3,
+                                weights_path=weights_path, class_weights=class_weights)
 
     # Evaluate on the existing test split
     test_loss, test_accuracy = model.evaluate(test_ds)

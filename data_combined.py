@@ -222,12 +222,19 @@ def create_tf_dataset(
 
     image_paths = list(image_paths)
     image_labels = list(image_labels)
+    rng = np.random.default_rng()
 
     def generator():
-        for image_path, label in zip(
-            image_paths,
-            image_labels,
-        ):
+        # Paths are listed class by class, so shuffle the whole list each epoch
+        # (a small shuffle buffer alone only mixes a few neighboring classes).
+        order = (
+            rng.permutation(len(image_paths))
+            if shuffle
+            else range(len(image_paths))
+        )
+        for index in order:
+            image_path = image_paths[index]
+            label = image_labels[index]
             image = load_and_preprocess_image(
                 image_path,
                 img_rows,
@@ -256,12 +263,6 @@ def create_tf_dataset(
             ),
         ),
     )
-
-    if shuffle:
-        dataset = dataset.shuffle(
-            buffer_size=min(len(image_paths), 2000),
-            reshuffle_each_iteration=True,
-        )
 
     dataset = dataset.batch(batch_size, drop_remainder=False)
     dataset = dataset.apply(

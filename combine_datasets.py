@@ -1,4 +1,4 @@
-# Combine 4 datasets to one large datasets
+# Combine 5 datasets to one large datasets
 
 import argparse
 import csv
@@ -11,7 +11,9 @@ GROCERY_ROOT = Path("./grocery_kaggle/GroceryStoreDataset")
 FRUITS_ROOT = Path("./fruits360_kaggle/fruits-360_100x100/fruits-360")
 INGREDIENT_ROOT = Path("./ingredient_dataset")
 FOOD_INGREDIENT_51_ROOT = Path("./food_ingredient_51")
+OPEN_IMAGES_ROOT = Path("./open_images")
 OUTPUT_ROOT = Path("./combined_dataset")
+STAGING_ROOT = Path("./combined_dataset_rebuild")
 
 SEED = 42
 IMAGE_EXTENSIONS = {
@@ -190,6 +192,17 @@ def collect_class_folder_dataset(root, source):
     return records
 
 
+def collect_existing_combined():
+    """
+    Read the current combined_dataset, keeping its train/val/test splits.
+    The original source is recovered from each filename, e.g. Grocery_Store_000001.jpg.
+    """
+    records = collect_class_folder_dataset(OUTPUT_ROOT, "Combined")
+    for record in records:
+        record["source"] = record["path"].stem.rsplit("_", 1)[0].replace("_", " ")
+    return records
+
+
 def collect_grocery_dataset():
     """
     Read Grocery Store Dataset split manifests.
@@ -337,17 +350,17 @@ def assign_splits(records, rng):
     return result
 
 
-def copy_dataset(records, overwrite=False):
-    if OUTPUT_ROOT.exists():
+def copy_dataset(records, overwrite=False, output_root=OUTPUT_ROOT):
+    if output_root.exists():
         if not overwrite:
             raise FileExistsError(
-                f"{OUTPUT_ROOT} already exists. "
+                f"{output_root} already exists. "
                 "Use --overwrite to rebuild it."
             )
-        shutil.rmtree(OUTPUT_ROOT)
+        shutil.rmtree(output_root)
 
     for split in ("train", "val", "test"):
-        (OUTPUT_ROOT / split).mkdir(parents=True, exist_ok=True)
+        (output_root / split).mkdir(parents=True, exist_ok=True)
 
     # Give copied images unique filenames to avoid collisions.
     counters = Counter()
@@ -361,7 +374,7 @@ def copy_dataset(records, overwrite=False):
         if split not in class_counts:
             continue
 
-        destination_dir = OUTPUT_ROOT / split / label
+        destination_dir = output_root / split / label
         destination_dir.mkdir(parents=True, exist_ok=True)
 
         counters[(split, label)] += 1
@@ -375,7 +388,7 @@ def copy_dataset(records, overwrite=False):
         class_counts[split][label] += 1
 
     print("\nDataset created successfully.")
-    print(f"Output: {OUTPUT_ROOT.resolve()}")
+    print(f"Output: {output_root.resolve()}")
 
     for split in ("train", "val", "test"):
         counts = class_counts[split]
@@ -405,22 +418,39 @@ def main():
         action="store_true",
         help="Delete and rebuild the existing combined_dataset folder.",
     )
+    parser.add_argument(
+        "--from-combined",
+        action="store_true",
+        help=(
+            "Rebuild from the existing combined_dataset (keeping its splits) "
+            "plus Open Images, instead of the raw downloads."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.from_combined and not args.overwrite:
+        parser.error("--from-combined replaces combined_dataset, so it also needs --overwrite")
 
     rng = random.Random(SEED)
 
     records = []
-    records.extend(collect_grocery_dataset())
-    records.extend(
-        collect_class_folder_dataset(FRUITS_ROOT, "Fruits-360")
-    )
-    records.extend(
-        collect_class_folder_dataset(INGREDIENT_ROOT, "Ingredient Dataset")
-    )
-    records.extend(
-        collect_class_folder_dataset(
-            FOOD_INGREDIENT_51_ROOT, "Food Ingredient 51"
+    if args.from_combined:
+        records.extend(collect_existing_combined())
+    else:
+        records.extend(collect_grocery_dataset())
+        records.extend(
+            collect_class_folder_dataset(FRUITS_ROOT, "Fruits-360")
         )
+        records.extend(
+            collect_class_folder_dataset(INGREDIENT_ROOT, "Ingredient Dataset")
+        )
+        records.extend(
+            collect_class_folder_dataset(
+                FOOD_INGREDIENT_51_ROOT, "Food Ingredient 51"
+            )
+        )
+    records.extend(
+        collect_class_folder_dataset(OPEN_IMAGES_ROOT, "Open Images")
     )
 
     if not records:
@@ -445,7 +475,15 @@ def main():
         unique_records.append(record)
 
     print(f"\nUnique images to copy: {len(unique_records)}")
-    copy_dataset(unique_records, overwrite=args.overwrite)
+
+    if args.from_combined:
+        # The sources live inside combined_dataset, so build beside it and swap.
+        copy_dataset(unique_records, overwrite=True, output_root=STAGING_ROOT)
+        shutil.rmtree(OUTPUT_ROOT)
+        STAGING_ROOT.rename(OUTPUT_ROOT)
+        print(f"Replaced {OUTPUT_ROOT.resolve()}")
+    else:
+        copy_dataset(unique_records, overwrite=args.overwrite)
 
 if __name__ == "__main__":
     main()
