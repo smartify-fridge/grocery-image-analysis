@@ -316,10 +316,8 @@ def prepare_combined_data(
     print("Preparing combined grocery dataset")
     print("=" * 60)
 
-    # 1. Generate one shared class order.
     class_names = get_class_names(dataset_root)
 
-    # 2. Save the exact order used by training.
     save_class_names(
         class_names,
         class_names_path,
@@ -336,7 +334,6 @@ def prepare_combined_data(
     print(f"Image size: {img_rows} x {img_cols}")
     print(f"Batch size: {batch_size}")
 
-    # 3. Discover images in all splits using the same mapping.
     train_paths, train_labels, train_counts = get_image_paths(
         dataset_root / "train",
         class_names,
@@ -367,7 +364,6 @@ def prepare_combined_data(
             "The test split contains no supported images."
         )
 
-    # Every declared class must have training examples.
     empty_training_classes = [
         name
         for name, count in train_counts.items()
@@ -396,7 +392,6 @@ def prepare_combined_data(
     if num_classes > 10:
         print(f"  ... and {num_classes - 10} more classes")
 
-    # 4. Build datasets with identical label indices.
     train_dataset = create_tf_dataset(
         train_paths,
         train_labels,

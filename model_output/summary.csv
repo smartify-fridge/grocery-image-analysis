@@ -1,0 +1,2 @@
+image,dino_detections,after_box_nms,after_sam2,after_mask_nms,classified_crops,accepted_classifications,dino_time_seconds,sam2_time_seconds,classification_time_seconds,annotated_image
+fridge_tina_01.jpg,36,35,30,30,30,24,61.064,6.161,4.571,model_output\annotated\fridge_tina_01_classified.jpg

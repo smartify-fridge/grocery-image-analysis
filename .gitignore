@@ -9,3 +9,5 @@ ingredient_dataset
 yolo11n.pt
 open_images/
 review_sheets/
+
+checkpoints/*.pt

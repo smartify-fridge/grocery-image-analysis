@@ -1,392 +1,1039 @@
-import os
-import glob
-import json
+"""
+Command to run: python use_model.py --images test_images_converted --crop-mode mask
+"""
 import argparse
-import numpy as np
-from PIL import Image
-from keras.utils import img_to_array
-from ultralytics import YOLO
-from lenet import LeNet
-from mobilenet import MobileNet
+import csv
+import json
+import re
+import time
 from pathlib import Path
+import numpy as np
+import torch
+from PIL import Image, ImageDraw, ImageFont
+from transformers import (
+    AutoProcessor,
+    AutoModelForZeroShotObjectDetection,
+)
+from keras.utils import img_to_array
+from mobilenet import MobileNet
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-CLASS_NAMES_PATH = "./class_names.json"
+DINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
+DETECTOR_CLASSES = "class_names.json"
+CLASSIFIER_CLASSES = "class_names.json"
+CLASSIFIER_WEIGHTS = "combined_mobilenet.weights.h5"
+PROJECT_DIR = Path(__file__).resolve().parent
+SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_t.yaml"
+SAM2_CONFIG_FILE = (
+    PROJECT_DIR
+    / "sam2_repo"
+    / "sam2"
+    / "configs"
+    / "sam2.1"
+    / "sam2.1_hiera_t.yaml"
+)
+SAM2_CHECKPOINT = str(PROJECT_DIR / "checkpoints" / "sam2.1_hiera_tiny.pt")
+OUTPUT_DIR = Path("model_output")
+IMG_SIZE = 192
+DINO_BOX_THRESHOLD = 0.30
+DINO_TEXT_THRESHOLD = 0.25
+SAM2_SCORE_THRESHOLD = 0.60
+CLASSIFIER_CONFIDENCE_THRESHOLD = 0.30
+BOX_NMS_THRESHOLD = 0.50
+MASK_NMS_THRESHOLD = 0.85
+MIN_MASK_AREA_RATIO = 0.001
+MAX_MASK_AREA_RATIO = 0.80
+CLASS_BATCH_SIZE = 20
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def load_class_mapping(path):
-    """Load the class names used when training the combined dataset."""
+    path = Path(path)
 
-    if not os.path.isfile(path):
+    if not path.exists():
         raise FileNotFoundError(
-            f"Class mapping not found: {path}\n"
-            "Save class_names.json from your training pipeline first."
+            f"Class mapping not found: {path}"
         )
+    with open(path, "r", encoding="utf-8") as f:
+        names = json.load(f)
 
-    with open(path, "r", encoding="utf-8") as file:
-        class_names = json.load(file)
-
-    if isinstance(class_names, dict):
-        # Supports mappings such as {"0": "Apple", "1": "Banana"}.
+    if isinstance(names, dict):
         try:
-            class_names = [
-                class_names[str(i)]
-                for i in range(len(class_names))
+            names = [
+                names[key]
+                for key in sorted(
+                    names,
+                    key=lambda x: int(x)
+                )
             ]
-        except KeyError as error:
+
+        except (ValueError, TypeError):
             raise ValueError(
-                "Class mapping dictionary must have consecutive "
-                "indices starting at 0."
-            ) from error
-
-    if (
-        not isinstance(class_names, list)
-        or not class_names
-        or not all(isinstance(name, str) for name in class_names)
-    ):
+                f"{path} must use numeric dictionary keys."
+            )
+    if not isinstance(names, list) or not names:
         raise ValueError(
-            "class_names.json must contain a non-empty list "
-            "of class names or an index-to-name dictionary."
+            f"{path} must contain a non-empty list."
+        )
+    names = [str(name).strip() for name in names]
+    if any(not name for name in names):
+        raise ValueError(
+            f"{path} contains an empty class name."
         )
 
-    if len(set(class_names)) != len(class_names):
-        raise ValueError(
-            "Class names contain duplicates. Check the training mapping."
-        )
+    return {i: name for i, name in enumerate(names)}
 
-    return {i: name for i, name in enumerate(class_names)}
-
-
-def load_classifier(model_type, class_names_path, weights_path):
-    """Build the classifier with the combined dataset's class count."""
-
-    label_map = load_class_mapping(class_names_path)
+def load_classifier(weights_path, classes_path):
+    print("\nLoading your trained MobileNetV2...")
+    label_map = load_class_mapping(classes_path)
     num_classes = len(label_map)
+    # Same architecture as your old code.
+    classifier, _ = MobileNet.build(
+        3,
+        IMG_SIZE,
+        IMG_SIZE,
+        num_classes
+    )
 
-    img_size = 192 if model_type == "mobilenet" else 64
-    channels = 3
-
-    if model_type == "mobilenet":
-        model, _ = MobileNet.build(
-            channels, img_size, img_size, num_classes
-        )
-    else:
-        model = LeNet.build(
-            channels, img_size, img_size, num_classes
-        )
-
-    if not os.path.isfile(weights_path):
+    weights_path = Path(weights_path)
+    if not weights_path.exists():
         raise FileNotFoundError(
             f"Classifier weights not found: {weights_path}"
         )
 
-    model.load_weights(weights_path)
-
-    # Check that the model output dimension matches the mapping.
-    output_classes = int(model.output_shape[-1])
-
-    if output_classes != num_classes:
+    classifier.load_weights(str(weights_path))
+    if int(classifier.output_shape[-1]) != num_classes:
         raise ValueError(
-            f"Model outputs {output_classes} classes, but the "
-            f"mapping contains {num_classes} classes."
+            "Classifier output size does not match "
+            "the number of classes in class_names.json.\n"
+            f"Model outputs: {classifier.output_shape[-1]}\n"
+            f"Class names: {num_classes}"
+        )
+    print("MobileNetV2 loaded successfully.")
+    print("Classifier classes:", num_classes)
+    print("Input size:", IMG_SIZE, "x", IMG_SIZE)
+    print("Weights:", weights_path)
+
+    return classifier, label_map
+
+def load_grounding_dino():
+    print("\nLoading Grounding DINO...")
+    processor = AutoProcessor.from_pretrained(DINO_MODEL_ID)
+    model = AutoModelForZeroShotObjectDetection.from_pretrained(DINO_MODEL_ID)
+    model.to(DEVICE)
+    model.eval()
+    print("Grounding DINO loaded successfully.")
+    return processor, model
+
+def load_sam2():
+    print("\nLoading SAM 2...")
+    if not SAM2_CONFIG_FILE.exists():
+        raise FileNotFoundError(
+            f"SAM 2 config not found: {SAM2_CONFIG_FILE}"
         )
 
-    print(f"Loaded {model_type} classifier.")
-    print(f"Number of classes: {num_classes}")
-    print(f"Classifier input size: {img_size} x {img_size}")
-    print(f"Weights: {weights_path}")
+    if not Path(SAM2_CHECKPOINT).exists():
+        raise FileNotFoundError(
+            f"SAM 2 checkpoint not found: {SAM2_CHECKPOINT}"
+        )
 
-    return model, img_size, label_map
+    print(f"Config found: {SAM2_CONFIG_FILE}")
+    print(f"Checkpoint found: {SAM2_CHECKPOINT}")
 
-
-def load_detector():
-    """Load the pretrained YOLO detector."""
-
-    print("\nLoading YOLO11n detector...")
-    return YOLO("yolo11n.pt")
-
-
-def get_image_paths(input_path):
-    """Accept one image or a directory of images."""
-
-    input_path = os.path.abspath(
-        os.path.expanduser(input_path.strip().strip('"'))
+    model = build_sam2(
+        SAM2_CONFIG,
+        SAM2_CHECKPOINT,
+        device=DEVICE
     )
+    predictor = SAM2ImagePredictor(model)
+    print("SAM 2 loaded successfully.")
 
-    extensions = (
-        ".jpg", ".jpeg", ".png", ".bmp", ".webp"
-    )
+    return predictor
 
-    if os.path.isfile(input_path):
-        if input_path.lower().endswith(extensions):
-            return [input_path]
-        return []
+def get_image_paths(folder):
+    folder = Path(folder)
+    extensions = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+        ".webp"
+    }
+    return sorted([
+        p for p in folder.rglob("*")
+        if p.is_file() and p.suffix.lower() in extensions
+    ])
 
-    if os.path.isdir(input_path):
-        paths = [
-            path
-            for path in glob.glob(
-                os.path.join(input_path, "*")
+def clean_prompt(name):
+    name = str(name).lower().strip()
+    name = name.replace("_", " ")
+    name = name.replace("-", " ")
+    name = re.sub(r"\s+", " ", name)
+    return name.strip(" .")
+
+def make_prompt_chunks(classes, batch_size):
+    prompts = []
+    seen = set()
+
+    for name in classes.values():
+        prompt = clean_prompt(name)
+
+        if prompt and prompt not in seen:
+            prompts.append(prompt)
+            seen.add(prompt)
+
+    return [
+        prompts[i:i + batch_size]
+        for i in range(0, len(prompts), batch_size)
+    ]
+
+def detect_with_dino(
+    image,
+    processor,
+    detector,
+    prompt_chunks,
+    box_threshold,
+    text_threshold
+):
+    width, height = image.size
+    detections = []
+
+    for batch_index, labels in enumerate(prompt_chunks):
+        print(
+            f"DINO batch {batch_index + 1}/"
+            f"{len(prompt_chunks)}"
+        )
+
+        inputs = processor(
+            images=image,
+            text=[labels],
+            return_tensors="pt"
+        )
+
+        inputs = {
+            key: value.to(DEVICE)
+            for key, value in inputs.items()
+        }
+
+        with torch.inference_mode():
+            outputs = detector(**inputs)
+
+        try:
+            results = processor.post_process_grounded_object_detection(
+                outputs,
+                inputs["input_ids"],
+                threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=[(height, width)],
+                text_labels=[labels]
             )
-            if os.path.isfile(path)
-            and path.lower().endswith(extensions)
-        ]
-        return sorted(paths)
 
-    return []
+        except TypeError:
+            results = processor.post_process_grounded_object_detection(
+                outputs,
+                inputs["input_ids"],
+                box_threshold=box_threshold,
+                text_threshold=text_threshold,
+                target_sizes=[(height, width)]
+            )
+        result = results[0]
+        boxes = result["boxes"].detach().cpu().numpy()
+        scores = result["scores"].detach().cpu().numpy()
+        detected_labels = result.get("text_labels")
+        if detected_labels is None:
+            detected_labels = result.get(
+                "labels",
+                ["unknown"] * len(boxes)
+            )
 
+        for box, score, label in zip(
+            boxes,
+            scores,
+            detected_labels
+        ):
+            if isinstance(label, torch.Tensor):
+                label = str(label.item())
+            x1, y1, x2, y2 = map(float, box)
+            x1 = max(0, min(x1, width - 1))
+            y1 = max(0, min(y1, height - 1))
+            x2 = max(0, min(x2, width))
+            y2 = max(0, min(y2, height))
 
-def classify_crop(classifier, crop, img_size, label_map):
-    """Classify one detected object."""
+            if x2 <= x1 or y2 <= y1:
+                continue
 
-    crop = crop.convert("RGB")
+            detections.append({
+                "detector_label": str(label),
+                "detector_confidence": float(score),
+                "box": [x1, y1, x2, y2]
+            })
+        del inputs, outputs, results
+    print("Raw DINO detections:", len(detections))
+    return detections
 
-    # Keep preprocessing consistent with training.
-    crop = crop.resize(
-        (img_size, img_size),
-        Image.Resampling.BILINEAR,
+def box_iou(a, b):
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    intersection = (
+        max(0, x2 - x1) *
+        max(0, y2 - y1)
     )
+    area_a = (
+        max(0, a[2] - a[0]) *
+        max(0, a[3] - a[1])
+    )
+    area_b = (
+        max(0, b[2] - b[0]) *
+        max(0, b[3] - b[1])
+    )
+    union = area_a + area_b - intersection
 
+    return intersection / union if union > 0 else 0
+
+def remove_duplicate_boxes(detections, threshold):
+    grouped = {}
+
+    for detection in detections:
+        label = detection["detector_label"]
+        grouped.setdefault(label, []).append(detection)
+    final = []
+    for label, group in grouped.items():
+        group.sort(
+            key=lambda x: x["detector_confidence"],
+            reverse=True
+        )
+        selected = []
+
+        while group:
+            best = group.pop(0)
+            selected.append(best)
+            remaining = []
+            for candidate in group:
+                overlap = box_iou(
+                    best["box"],
+                    candidate["box"]
+                )
+                if overlap < threshold:
+                    remaining.append(candidate)
+            group = remaining
+        final.extend(selected)
+    return final
+
+def segment_with_sam2(
+    image,
+    detections,
+    predictor,
+    score_threshold,
+    min_area,
+    max_area
+):
+    image_array = np.array(image.convert("RGB"))
+    height, width = image_array.shape[:2]
+    image_area = height * width
+    predictor.set_image(image_array)
+    results = []
+    for index, detection in enumerate(detections):
+        print(
+            f"SAM 2: {index + 1}/{len(detections)} "
+            f"{detection['detector_label']}"
+        )
+        box = np.array(
+            detection["box"],
+            dtype=np.float32
+        )
+        masks, scores, _ = predictor.predict(
+            box=box,
+            multimask_output=False
+        )
+        mask = masks[0].astype(bool)
+        sam_score = float(scores[0])
+        mask_area = int(mask.sum())
+        area_ratio = mask_area / image_area
+
+        if sam_score < score_threshold:
+            print("  Rejected: low SAM 2 score")
+            continue
+
+        if area_ratio < min_area:
+            print("  Rejected: mask too small")
+            continue
+
+        if area_ratio > max_area:
+            print("  Rejected: mask too large")
+            continue
+
+        results.append({
+            **detection,
+            "mask": mask,
+            "sam_score": sam_score,
+            "mask_area": mask_area,
+            "mask_area_ratio": area_ratio
+        })
+
+    return results
+
+def mask_iou(mask_a, mask_b):
+    intersection = np.logical_and(
+        mask_a,
+        mask_b
+    ).sum()
+    union = np.logical_or(
+        mask_a,
+        mask_b
+    ).sum()
+
+    return intersection / union if union > 0 else 0
+
+def remove_duplicate_masks(detections, threshold):
+    grouped = {}
+    for detection in detections:
+        grouped.setdefault(
+            detection["detector_label"],
+            []
+        ).append(detection)
+
+    final = []
+    for label, group in grouped.items():
+        group.sort(
+            key=lambda x: (
+                x["sam_score"],
+                x["detector_confidence"]
+            ),
+            reverse=True
+        )
+
+        selected = []
+        for candidate in group:
+            duplicate = False
+            for existing in selected:
+                overlap = mask_iou(
+                    candidate["mask"],
+                    existing["mask"]
+                )
+
+                if overlap >= threshold:
+                    duplicate = True
+                    break
+            if not duplicate:
+                selected.append(candidate)
+        final.extend(selected)
+    return final
+
+def prepare_crop(image, detection, crop_padding, crop_mode):
+    x1, y1, x2, y2 = detection["box"]
+    width, height = image.size
+    box_width = x2 - x1
+    box_height = y2 - y1
+    pad_x = box_width * crop_padding
+    pad_y = box_height * crop_padding
+    left = max(0, int(round(x1 - pad_x)))
+    top = max(0, int(round(y1 - pad_y)))
+    right = min(width, int(round(x2 + pad_x)))
+    bottom = min(height, int(round(y2 + pad_y)))
+    if right <= left or bottom <= top:
+        return None, None
+    crop = image.crop(
+        (left, top, right, bottom)
+    ).convert("RGB")
+
+    # Optional segmentation-mask crop.
+    # Default is rectangular crop.
+    if crop_mode == "mask":
+        mask = detection["mask"]
+
+        local_mask = mask[
+            top:bottom,
+            left:right
+        ]
+
+        crop_array = np.array(crop)
+        # White background outside the segmented ingredient.
+        crop_array[~local_mask] = 255
+        crop = Image.fromarray(crop_array)
+
+    return crop, (left, top, right, bottom)
+
+def classify_crop(classifier, crop, label_map):
+    # Same preprocessing as your old code.
+    crop = crop.convert("RGB")
+    crop = crop.resize(
+        (IMG_SIZE, IMG_SIZE),
+        Image.Resampling.BILINEAR
+    )
     image_array = img_to_array(crop).astype(np.float32) / 255.0
     image_array = np.expand_dims(image_array, axis=0)
-
     probabilities = classifier.predict(
-        image_array, verbose=0
+        image_array,
+        verbose=0
     )[0]
-
     predicted_index = int(np.argmax(probabilities))
     confidence = float(probabilities[predicted_index])
+    predicted_label = label_map[predicted_index]
 
-    label = label_map[predicted_index]
+    return predicted_label, confidence
 
-    return label, confidence
-
-
-def detect_and_classify(
-    image_path,
-    detector,
-    classifier,
-    img_size,
-    label_map,
-    detector_confidence=0.25,
-    classifier_confidence=0.30,
-    save_visualization=False,
-):
-    """Detect objects, classify crops, and return unique labels."""
-
-    with Image.open(image_path) as source:
-        original = source.convert("RGB")
-
-    width, height = original.size
-
-    results = detector.predict(
-        source=np.asarray(original),
-        conf=detector_confidence,
-        imgsz=1024,
-        save=False,
-        verbose=False,
+def safe_filename(value):
+    value = re.sub(
+        r"[^\w.-]+",
+        "_",
+        str(value)
     )
+    return value.strip("._") or "ingredient"
 
-    result = results[0]
+def classify_detections(
+    image,
+    detections,
+    classifier,
+    label_map,
+    output_folder,
+    image_stem,
+    confidence_threshold,
+    crop_padding,
+    crop_mode,
+    save_all_crops
+):
+    crop_folder = (
+        output_folder
+        / "crops"
+        / image_stem
+    )
+    crop_folder.mkdir(parents=True, exist_ok=True)
+    predictions = []
 
-    if result.boxes is None or len(result.boxes) == 0:
-        print("No objects detected.")
-        if save_visualization:
-            save_annotated_image(result, image_path)
-        return {}
-
-    best_predictions = {}
-
-    for box in result.boxes:
-        x1, y1, x2, y2 = (
-            box.xyxy[0].cpu().numpy().astype(int)
+    for index, detection in enumerate(detections):
+        print(
+            f"\nClassifying crop {index + 1}/"
+            f"{len(detections)}"
         )
 
-        # Add padding around the detection.
-        pad_x = int((x2 - x1) * 0.08)
-        pad_y = int((y2 - y1) * 0.08)
-
-        x1 = max(0, x1 - pad_x)
-        y1 = max(0, y1 - pad_y)
-        x2 = min(width, x2 + pad_x)
-        y2 = min(height, y2 + pad_y)
-
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-        crop = original.crop((x1, y1, x2, y2))
-
-        label, confidence = classify_crop(
-            classifier, crop, img_size, label_map
+        crop, crop_box = prepare_crop(
+            image,
+            detection,
+            crop_padding,
+            crop_mode
         )
 
-        if confidence < classifier_confidence:
+        if crop is None:
             continue
 
-        # Keep the strongest prediction per category.
-        if (
-            label not in best_predictions
-            or confidence > best_predictions[label]["confidence"]
-        ):
-            best_predictions[label] = {
-                "confidence": confidence,
-                "box": (x1, y1, x2, y2),
-            }
+        predicted_label, classifier_score = classify_crop(classifier, crop, label_map)
+        accepted = (
+            classifier_score >= confidence_threshold
+        )
 
-    if not best_predictions:
-        print("No predictions passed the confidence threshold.")
-    else:
-        print("\nPredicted grocery categories:")
+        crop_name = (
+            f"{index + 1:03d}_"
+            f"{safe_filename(predicted_label)}_"
+            f"{classifier_score:.2f}.jpg"
+        )
 
-        for label, prediction in sorted(
-            best_predictions.items(),
-            key=lambda item: item[1]["confidence"],
-            reverse=True,
-        ):
-            print(
-                f"- {label} "
-                f"({prediction['confidence']:.1%})"
+        if accepted or save_all_crops:
+            crop.save(
+                crop_folder / crop_name,
+                quality=95
             )
 
-    if save_visualization:
-        save_annotated_image(result, image_path)
+        prediction = {
+            "predicted_label": predicted_label,
+            "classifier_confidence": classifier_score,
+            "accepted": accepted,
+            "detector_label": detection["detector_label"],
+            "detector_confidence": detection["detector_confidence"],
+            "sam_score": detection["sam_score"],
+            "box": crop_box,
+            "mask": detection["mask"],
+            "mask_area": detection["mask_area"],
+            "mask_area_ratio": detection["mask_area_ratio"],
+            "crop_path": str(crop_folder / crop_name)
+        }
+        predictions.append(prediction)
 
-    return best_predictions
+        if accepted:
+            print(
+                f"  ACCEPTED: {predicted_label} "
+                f"({classifier_score:.1%})"
+            )
 
+        else:
+            print(
+                f"  REJECTED: {predicted_label} "
+                f"({classifier_score:.1%})"
+            )
 
-def save_annotated_image(result, image_path):
-    """Save YOLO's bounding-box visualization."""
+    return predictions
 
-    annotated_bgr = result.plot()
-    annotated_rgb = annotated_bgr[:, :, ::-1]
+def save_annotated_image(image, predictions, output_path):
+    image_array = np.array(
+        image.convert("RGB")
+    ).astype(np.float32)
+    overlay = image_array.copy()
 
-    output_path = (
-        os.path.splitext(image_path)[0] + "_detected.jpg"
+    # Display masks only for accepted predictions.
+    for prediction in predictions:
+        if not prediction["accepted"]:
+            continue
+
+        mask = prediction["mask"]
+        seed = sum(
+            ord(c)
+            for c in prediction["predicted_label"]
+        )
+
+        rng = np.random.default_rng(seed)
+        color = rng.integers(
+            50,
+            256,
+            size=3
+        )
+
+        overlay[mask] = (
+            0.45 * overlay[mask]
+            + 0.55 * color
+        )
+
+    overlay = np.clip(overlay, 0, 255).astype(np.uint8)
+    result = Image.fromarray(overlay)
+    draw = ImageDraw.Draw(result)
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+    except OSError:
+        font = ImageFont.load_default()
+
+    for prediction in predictions:
+        if not prediction["accepted"]:
+            continue
+
+        x1, y1, x2, y2 = prediction["box"]
+        label = prediction["predicted_label"]
+        confidence = prediction["classifier_confidence"]
+        text = f"{label} ({confidence:.1%})"
+        seed = sum(ord(c) for c in label)
+        rng = np.random.default_rng(seed)
+        color = tuple(
+            int(x)
+            for x in rng.integers(50, 256, size=3)
+        )
+
+        draw.rectangle(
+            (x1, y1, x2, y2),
+            outline=color,
+            width=3
+        )
+
+        text_y = max(0, y1 - 22)
+        text_bbox = draw.textbbox(
+            (x1, text_y),
+            text,
+            font=font
+        )
+
+        draw.rectangle(text_bbox, fill=color)
+        draw.text(
+            (x1, text_y),
+            text,
+            fill="white",
+            font=font
+        )
+
+    result.save(output_path, quality=95)
+
+def process_image(
+    image_path,
+    processor,
+    detector,
+    prompt_chunks,
+    predictor,
+    classifier,
+    label_map,
+    output_folder,
+    args
+):
+    print("\n" + "=" * 65)
+    print("Processing:", image_path.name)
+    print("=" * 65)
+    image = Image.open(image_path).convert("RGB")
+    image_stem = image_path.stem
+    dino_start = time.perf_counter()
+    dino_detections = detect_with_dino(
+        image,
+        processor,
+        detector,
+        prompt_chunks,
+        args.box_threshold,
+        args.text_threshold
     )
+    dino_time = time.perf_counter() - dino_start
+    box_filtered = remove_duplicate_boxes(dino_detections, args.box_nms)
+    print("\nAfter box filtering:", len(box_filtered))
+    sam_start = time.perf_counter()
+    segmented = segment_with_sam2(
+        image,
+        box_filtered,
+        predictor,
+        args.sam_threshold,
+        args.min_area,
+        args.max_area
+    )
+    sam_time = time.perf_counter() - sam_start
+    print( "\nAfter SAM 2 filtering:", len(segmented))
+    mask_filtered = remove_duplicate_masks(segmented, args.mask_nms)
+    print("After mask NMS:", len(mask_filtered))
+    classification_start = time.perf_counter()
+    predictions = classify_detections(
+        image=image,
+        detections=mask_filtered,
+        classifier=classifier,
+        label_map=label_map,
+        output_folder=output_folder,
+        image_stem=image_stem,
+        confidence_threshold=args.classifier_threshold,
+        crop_padding=args.crop_padding,
+        crop_mode=args.crop_mode,
+        save_all_crops=args.save_all_crops
+    )
+    classification_time = time.perf_counter() - classification_start
+    accepted = [
+        p for p in predictions
+        if p["accepted"]
+    ]
 
-    Image.fromarray(annotated_rgb).save(output_path)
-    print(f"Saved visualization: {output_path}")
+    annotated_folder = output_folder / "annotated"
+    annotated_folder.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+    annotated_path = (annotated_folder / f"{image_stem}_classified.jpg")
+    save_annotated_image(image, predictions, annotated_path)
+    print("\nSaved annotated image:", annotated_path)
+    rows = []
+    for prediction in predictions:
+        x1, y1, x2, y2 = prediction["box"]
+        rows.append({
+            "image": image_path.name,
+            "detector_label": prediction["detector_label"],
+            "detector_confidence": prediction["detector_confidence"],
+            "sam2_score": prediction["sam_score"],
+            "classifier_label": prediction["predicted_label"],
+            "classifier_confidence": prediction["classifier_confidence"],
+            "accepted": prediction["accepted"],
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "mask_area_pixels": prediction["mask_area"],
+            "mask_area_ratio": prediction["mask_area_ratio"],
+            "crop_path": prediction["crop_path"]
+        })
 
+    summary = {
+        "image": image_path.name,
+        "dino_detections": len(dino_detections),
+        "after_box_nms": len(box_filtered),
+        "after_sam2": len(segmented),
+        "after_mask_nms": len(mask_filtered),
+        "classified_crops": len(predictions),
+        "accepted_classifications": len(accepted),
+        "dino_time_seconds": round(dino_time, 3),
+        "sam2_time_seconds": round(sam_time, 3),
+        "classification_time_seconds": round(
+            classification_time, 3
+        ),
+        "annotated_image": str(annotated_path)
+    }
+
+    return rows, summary
 
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Detect objects with YOLO and classify them using "
-            "a trained grocery classifier."
+            "Grounding DINO + SAM 2 + trained MobileNetV2"
         )
     )
 
     parser.add_argument(
-        "-m", "--model",
-        choices=["lenet", "mobilenet"],
-        default="mobilenet",
-        help="Classifier architecture.",
+        "--images",
+        default="test_images"
     )
 
     parser.add_argument(
-        "-i", "--image",
-        required=True,
-        help="Path to an image or directory of images.",
+        "--detector-classes",
+        default=DETECTOR_CLASSES
     )
 
     parser.add_argument(
-        "--classes",
-        default=CLASS_NAMES_PATH,
-        help="Path to the training class mapping JSON.",
+        "--classifier-classes",
+        default=CLASSIFIER_CLASSES
     )
 
     parser.add_argument(
         "--weights",
-        default=None,
-        help="Optional explicit path to classifier weights.",
+        default=CLASSIFIER_WEIGHTS
     )
 
     parser.add_argument(
-        "--detector-confidence",
+        "--output",
+        default=str(OUTPUT_DIR)
+    )
+
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=0
+    )
+
+    parser.add_argument(
+        "--box-threshold",
         type=float,
-        default=0.25,
-        help="Minimum YOLO confidence.",
+        default=DINO_BOX_THRESHOLD
     )
 
     parser.add_argument(
-        "--classifier-confidence",
+        "--text-threshold",
         type=float,
-        default=0.30,
-        help="Minimum grocery classifier confidence.",
+        default=DINO_TEXT_THRESHOLD
     )
 
     parser.add_argument(
-        "--save-visualization",
-        action="store_true",
-        help="Save YOLO bounding-box images.",
+        "--sam-threshold",
+        type=float,
+        default=SAM2_SCORE_THRESHOLD
     )
 
+    parser.add_argument(
+        "--classifier-threshold",
+        type=float,
+        default=CLASSIFIER_CONFIDENCE_THRESHOLD
+    )
+
+    parser.add_argument(
+        "--box-nms",
+        type=float,
+        default=BOX_NMS_THRESHOLD
+    )
+
+    parser.add_argument(
+        "--mask-nms",
+        type=float,
+        default=MASK_NMS_THRESHOLD
+    )
+
+    parser.add_argument(
+        "--min-area",
+        type=float,
+        default=MIN_MASK_AREA_RATIO
+    )
+
+    parser.add_argument(
+        "--max-area",
+        type=float,
+        default=MAX_MASK_AREA_RATIO
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=CLASS_BATCH_SIZE
+    )
+
+    parser.add_argument(
+        "--crop-padding",
+        type=float,
+        default=0.05
+    )
+
+    parser.add_argument(
+        "--crop-mode",
+        choices=["box", "mask"],
+        default="box",
+        help="Use rectangular box crop or SAM 2 masked crop."
+    )
+
+    parser.add_argument(
+        "--save-all-crops",
+        action="store_true"
+    )
     args = parser.parse_args()
 
-    for name in (
-        "detector_confidence",
-        "classifier_confidence",
-    ):
+    for name in [
+        "box_threshold",
+        "text_threshold",
+        "sam_threshold",
+        "classifier_threshold",
+        "box_nms",
+        "mask_nms"
+    ]:
         value = getattr(args, name)
-        if not 0.0 <= value <= 1.0:
-            parser.error(f"--{name.replace('_', '-')} must be between 0 and 1")
 
-    if args.weights is None:
-        prefix = (
-            "combined"
-            if args.model == "mobilenet"
-            else "grocery"
+        if not 0 <= value <= 1:
+            parser.error(f"{name} must be between 0 and 1.")
+
+    if args.batch_size < 1:
+        parser.error("--batch-size must be at least 1.")
+
+    if args.crop_padding < 0:
+        parser.error("--crop-padding cannot be negative.")
+
+    if not 0 < args.min_area <= args.max_area <= 1:
+        parser.error(
+            "Area thresholds must satisfy "
+            "0 < min-area <= max-area <= 1."
         )
-        weights_path = f"{prefix}_mobilenet.weights.h5" 
-    else:
-        weights_path = args.weights
 
-    try:
-        classifier, img_size, label_map = load_classifier(
-            args.model,
-            args.classes,
-            weights_path,
+    print("=" * 65)
+    print("GROUNDING DINO + SAM 2 + MOBILENETV2")
+    print("=" * 65)
+    print("Device:", DEVICE)
+
+    if DEVICE == "cpu":
+        print("WARNING: CPU inference will be slow.")
+
+    image_folder = Path(args.images)
+    if not image_folder.exists():
+        raise FileNotFoundError(
+            f"Image folder not found: {image_folder}"
         )
-        detector = load_detector()
 
-    except Exception as error:
-        parser.error(str(error))
+    output_folder = Path(args.output)
+    output_folder.mkdir(parents=True, exist_ok=True)
 
-    image_paths = get_image_paths(args.image)
+    detector_classes = load_class_mapping(
+        args.detector_classes
+    )
+
+    classifier_classes = load_class_mapping(
+        args.classifier_classes
+    )
+
+    print(
+        "\nGrounding DINO prompt classes:",
+        len(detector_classes)
+    )
+
+    print(
+        "MobileNetV2 classifier classes:",
+        len(classifier_classes)
+    )
+
+    classifier, label_map = load_classifier(
+        args.weights,
+        args.classifier_classes
+    )
+    processor, detector = load_grounding_dino()
+    predictor = load_sam2()
+    prompt_chunks = make_prompt_chunks(detector_classes, args.batch_size)
+    print("\nGrounding DINO prompt batches:", len(prompt_chunks))
+    image_paths = get_image_paths(image_folder)
+
+    if args.max_images > 0:
+        image_paths = image_paths[:args.max_images]
 
     if not image_paths:
-        parser.error(
-            f"No supported images found at: {args.image}"
+        raise RuntimeError(
+            "No supported images found."
         )
+    print("\nImages to process:", len(image_paths))
 
-    print(f"\nFound {len(image_paths)} image(s).")
+    all_rows = []
+    all_summaries = []
 
-    successful = 0
-    failed = 0
-
-    for image_path in image_paths:
-        print("\n" + "=" * 50)
-        print(f"Image: {os.path.basename(image_path)}")
-        print("=" * 50)
+    for index, image_path in enumerate(image_paths):
+        print(f"\nImage {index + 1}/{len(image_paths)}")
 
         try:
-            detect_and_classify(
+            rows, summary = process_image(
                 image_path=image_path,
+                processor=processor,
                 detector=detector,
+                prompt_chunks=prompt_chunks,
+                predictor=predictor,
                 classifier=classifier,
-                img_size=img_size,
                 label_map=label_map,
-                detector_confidence=args.detector_confidence,
-                classifier_confidence=args.classifier_confidence,
-                save_visualization=args.save_visualization,
+                output_folder=output_folder,
+                args=args
             )
-            successful += 1
+            all_rows.extend(rows)
+            all_summaries.append(summary)
 
         except Exception as error:
-            print(f"Failed to process image: {error}")
-            failed += 1
+            print(f"ERROR processing {image_path.name}: {error}")
 
-    print("\nProcessing summary")
-    print(f"Successfully processed: {successful}")
-    print(f"Failed: {failed}")
+    detection_csv = output_folder / "detections.csv"
+    columns = [
+        "image",
+        "detector_label",
+        "detector_confidence",
+        "sam2_score",
+        "classifier_label",
+        "classifier_confidence",
+        "accepted",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "mask_area_pixels",
+        "mask_area_ratio",
+        "crop_path"
+    ]
+
+    with open(
+        detection_csv,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(all_rows)
+
+    summary_csv = output_folder / "summary.csv"
+    summary_columns = [
+        "image",
+        "dino_detections",
+        "after_box_nms",
+        "after_sam2",
+        "after_mask_nms",
+        "classified_crops",
+        "accepted_classifications",
+        "dino_time_seconds",
+        "sam2_time_seconds",
+        "classification_time_seconds",
+        "annotated_image"
+    ]
+
+    with open(summary_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=summary_columns
+        )
+        writer.writeheader()
+        writer.writerows(all_summaries)
+
+    total_detections = sum(
+        x["dino_detections"]
+        for x in all_summaries
+    )
+    total_crops = sum(
+        x["classified_crops"]
+        for x in all_summaries
+    )
+    total_accepted = sum(
+        x["accepted_classifications"]
+        for x in all_summaries
+    )
+
+    print("\n" + "=" * 65)
+    print("PROCESSING COMPLETED")
+    print("=" * 65)
+    print("Images processed:", len(all_summaries))
+    print("Raw DINO detections:", total_detections)
+    print("Crops classified:", total_crops)
+    print("Accepted classifications:", total_accepted)
+    print("Detection results:", detection_csv)
+    print("Summary:", summary_csv)
+    print("Output folder:", output_folder)
 
 
 if __name__ == "__main__":
