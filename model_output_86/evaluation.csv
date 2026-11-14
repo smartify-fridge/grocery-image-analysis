@@ -1,0 +1,18 @@
+image,correct,wrong,missed,precision,recall,f1,actual,predicted
+fridge_tina_01.jpg,0,3,4,0.0,0.0,0,"Eggs, Poultry, Red Meat, Yogurt","Bacon & Deli Meat, Shellfish & Seafood, Squash"
+tina_02.jpg,0,6,7,0.0,0.0,0,"Berries, Carrot, Cheese, Eggs, Onion, Plant Milk, Yogurt","Bottle, Bread, Cabbage, Can, Coconut, Milk"
+tina_03.jpg,0,4,2,0.0,0.0,0,"Cheese, Juice","Bottle, Can, Milk, Squash"
+tina_04.jpg,0,4,2,0.0,0.0,0,"Apple, Grapes","Bottle, Cheese, Red Meat, Stone Fruit"
+tina_05.jpg,0,1,1,0.0,0.0,0,Yogurt,Milk
+tina_06.jpg,0,2,1,0.0,0.0,0,Yogurt,"Bottle, Can"
+tina_07.jpg,0,3,4,0.0,0.0,0,"Apple, Bacon & Deli Meat, Eggs, Yogurt","Bottle, Can, Wine"
+tina_08.jpg,2,6,5,0.25,0.286,0.267,"Bread, Eggs, Grapes, Juice, Lettuce, Milk, Yogurt","Bottle, Bread, Cabbage, Can, Milk, Red Meat, Shellfish & Seafood, Wine"
+tina_09.jpg,0,7,5,0.0,0.0,0,"Apple, Eggs, Grapes, Milk, Yogurt","Bottle, Bread, Cabbage, Can, Cheese, Stone Fruit, Wine"
+tina_10.jpg,1,4,3,0.2,0.25,0.222,"Bread, Cheese, Eggs, Milk","Can, Fresh Herbs, Milk, Wine, Yogurt"
+tyler_friend_1_bottom_shelf.jpg,1,7,1,0.125,0.5,0.2,"Beer, Can","Bacon & Deli Meat, Bread, Can, Cheese, Milk, Mushroom, Shellfish & Seafood, Strawberry"
+tyler_friend_1_middle_shelf.jpg,1,8,2,0.111,0.333,0.167,"Berries, Sausage, Strawberry","Bottle, Bread, Cheese, Milk, Shellfish & Seafood, Stone Fruit, Strawberry, Watermelon, Zucchini"
+tyler_friend_1_top_shelf.jpg,2,2,5,0.5,0.286,0.364,"Bread, Can, Cheese, Cucumber, Eggs, Milk, Onion","Bottle, Can, Cucumber, Shellfish & Seafood"
+tyler_friend_2_bottom_shelf.jpg,1,5,5,0.167,0.167,0.167,"Bacon & Deli Meat, Cheese, Eggs, Grapes, Poultry, Yogurt","Cabbage, Can, Cheese, Fish, Milk, Shellfish & Seafood"
+tyler_friend_2_middle_shelf.jpg,2,4,2,0.333,0.5,0.4,"Cheese, Juice, Milk, Poultry","Bottle, Cheese, Fish, Milk, Mushroom, Wine"
+tyler_friend_2_top_shelf.jpg,2,2,3,0.5,0.4,0.444,"Cheese, Eggs, Milk, Poultry, Yogurt","Bottle, Can, Cheese, Milk"
+OVERALL,12,68,52,0.15,0.188,0.167,,

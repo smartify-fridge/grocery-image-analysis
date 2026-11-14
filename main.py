@@ -153,6 +153,9 @@ def main():
     parser.add_argument("-s", "--scratch", type=int, choices=[0, 1], default=0)
     args = parser.parse_args()
 
+    # without this, a Mac GPU silently trains the Dense ReLU layers (both models) without their ReLU
+    MobileNet.fix_metal_relu()
+
     # Image size for each model
     img_rows = 192 if args.model == "mobilenet" else 64
     img_cols = img_rows

@@ -1,3 +1,5 @@
+import sys
+import tensorflow as tf
 from keras import Model
 from keras.applications import MobileNetV2
 from keras.layers import (Input, Dense, Dropout, GlobalAveragePooling2D, Rescaling,
@@ -5,8 +7,10 @@ from keras.layers import (Input, Dense, Dropout, GlobalAveragePooling2D, Rescali
 
 # MobileNetV2 pretrained on ImageNet (1.4M images, 1000 classes) with a new grocery classifier on top
 class MobileNet:
+    # head_relu=False rebuilds models trained on a Mac GPU before Nov 2026: tensorflow-metal's
+    # compiled Dense(activation="relu") silently skips the ReLU, so those weights were learned without it
     @staticmethod
-    def build(channels, im_rows, im_cols, nb_classes):
+    def build(channels, im_rows, im_cols, nb_classes, head_relu=True):
         inputs = Input(shape=(im_rows, im_cols, channels))
 
         # data augmentation, only active during training
@@ -26,11 +30,19 @@ class MobileNet:
         x = base(x, training=False)
 
         x = GlobalAveragePooling2D()(x)
-        x = Dense(256, activation="relu")(x)
+        x = Dense(256, activation="relu" if head_relu else None)(x)
         x = Dropout(0.4)(x)
         outputs = Dense(nb_classes, activation="softmax")(x)
 
         return Model(inputs, outputs), base
+
+    # tensorflow-metal's graph optimizer fuses Dense + ReLU into one op that drops the ReLU,
+    # so on a Mac GPU, turn graph optimization off before training or running a head_relu=True model
+    @staticmethod
+    def fix_metal_relu():
+        if sys.platform == "darwin" and tf.config.list_physical_devices("GPU"):
+            tf.config.optimizer.set_experimental_options({"disable_meta_optimizer": True})
+            print("Mac GPU: graph optimization off so Dense ReLU layers run correctly")
 
     # lets the last n layers of the pretrained base keep learning, leaving batch norm layers frozen
     @staticmethod

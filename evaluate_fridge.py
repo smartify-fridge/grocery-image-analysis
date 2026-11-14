@@ -10,6 +10,7 @@ Rows with an empty class are items the model has no class for; they're listed bu
 
 An item counts as correct when the model finds that class in that photo. Counts matter:
 if a photo has 2 egg cartons and the model finds 1, that's 1 correct and 1 missed.
+With --presence, counts are ignored: each class either is or isn't in the photo.
 """
 import argparse
 import csv
@@ -79,11 +80,17 @@ def main():
     parser.add_argument("--ground-truth", default="fridge_ground_truth.csv")
     parser.add_argument("--classes", default="trained_model/class_names.json")
     parser.add_argument("--output", default="model_output/evaluation.csv")
+    parser.add_argument("--presence", action="store_true",
+                        help="ignore counts; score whether each class is found in each photo")
     args = parser.parse_args()
 
     class_names = set(json.loads(Path(args.classes).read_text(encoding="utf-8")))
     truth, unscored, unverified = load_ground_truth(args.ground_truth, class_names)
     predictions = load_predictions(args.detections)
+
+    if args.presence:
+        truth = defaultdict(Counter, {image: Counter(set(c)) for image, c in truth.items()})
+        predictions = defaultdict(Counter, {image: Counter(set(c)) for image, c in predictions.items()})
 
     missing = sorted(set(truth) - set(predictions))
     if missing:

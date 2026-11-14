@@ -28,6 +28,9 @@ DINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 DETECTOR_CLASSES = "detector_prompts.json"
 CLASSIFIER_CLASSES = "trained_model/class_names.json"
 CLASSIFIER_WEIGHTS = "trained_model/combined_mobilenet.weights.h5"
+# these weights were trained on a Mac GPU, where the head's ReLU was skipped (see mobilenet.py);
+# use --head-relu for models trained after that fix
+CLASSIFIER_HEAD_RELU = False
 PROJECT_DIR = Path(__file__).resolve().parent
 SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_t.yaml"
 SAM2_CONFIG_FILE = (
@@ -98,7 +101,7 @@ def load_class_mapping(path):
 
     return {i: name for i, name in enumerate(names)}
 
-def load_classifier(weights_path, classes_path):
+def load_classifier(weights_path, classes_path, head_relu=CLASSIFIER_HEAD_RELU):
     print("\nLoading your trained MobileNetV2...")
     label_map = load_class_mapping(classes_path)
     num_classes = len(label_map)
@@ -107,7 +110,8 @@ def load_classifier(weights_path, classes_path):
         3,
         IMG_SIZE,
         IMG_SIZE,
-        num_classes
+        num_classes,
+        head_relu=head_relu
     )
 
     weights_path = Path(weights_path)
@@ -884,6 +888,13 @@ def main():
     )
 
     parser.add_argument(
+        "--head-relu",
+        action="store_true",
+        default=CLASSIFIER_HEAD_RELU,
+        help="Use for weights trained after the tensorflow-metal ReLU fix (e.g. on the RC server)."
+    )
+
+    parser.add_argument(
         "--output",
         default=str(OUTPUT_DIR)
     )
@@ -1051,9 +1062,13 @@ def main():
         len(classifier_classes)
     )
 
+    if args.head_relu:
+        MobileNet.fix_metal_relu()
+
     classifier, label_map = load_classifier(
         args.weights,
-        args.classifier_classes
+        args.classifier_classes,
+        args.head_relu
     )
     processor, detector = load_grounding_dino()
     predictor = load_sam2()
