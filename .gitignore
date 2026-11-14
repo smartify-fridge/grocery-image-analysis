@@ -11,3 +11,6 @@ open_images/
 review_sheets/
 
 checkpoints/*.pt
+# raw downloads, not used for training (combined_dataset/ is)
+fruits360_kaggle/
+waste_classification_data/
