@@ -4,10 +4,14 @@ Command to run: python use_model.py --images test_images_converted --crop-mode m
 import argparse
 import csv
 import json
+import os
 import re
 import time
 from pathlib import Path
 import numpy as np
+
+# lets ops the Mac GPU doesn't support fall back to the CPU; must be set before importing torch
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import torch
 from PIL import Image, ImageDraw, ImageFont
 from transformers import (
@@ -20,9 +24,10 @@ from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 DINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
-DETECTOR_CLASSES = "class_names.json"
-CLASSIFIER_CLASSES = "class_names.json"
-CLASSIFIER_WEIGHTS = "combined_mobilenet.weights.h5"
+# 86-class model trained on combined_dataset/; the class list must match the weights
+DETECTOR_CLASSES = "detector_prompts.json"
+CLASSIFIER_CLASSES = "trained_model/class_names.json"
+CLASSIFIER_WEIGHTS = "trained_model/combined_mobilenet.weights.h5"
 PROJECT_DIR = Path(__file__).resolve().parent
 SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_t.yaml"
 SAM2_CONFIG_FILE = (
@@ -40,12 +45,22 @@ DINO_BOX_THRESHOLD = 0.30
 DINO_TEXT_THRESHOLD = 0.25
 SAM2_SCORE_THRESHOLD = 0.60
 CLASSIFIER_CONFIDENCE_THRESHOLD = 0.30
+# Duplicate filtering. Every prompt batch is a separate DINO pass, so the same
+# item usually comes back several times under different prompt words.
+PREFILTER_IOU_THRESHOLD = 0.90
 BOX_NMS_THRESHOLD = 0.50
-MASK_NMS_THRESHOLD = 0.85
+MASK_NMS_THRESHOLD = 0.60
+CONTAINMENT_THRESHOLD = 0.85
+GROUP_BOX_MIN_ITEMS = 2
 MIN_MASK_AREA_RATIO = 0.001
 MAX_MASK_AREA_RATIO = 0.80
 CLASS_BATCH_SIZE = 20
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+elif torch.backends.mps.is_available():
+    DEVICE = "mps"
+else:
+    DEVICE = "cpu"
 
 def load_class_mapping(path):
     path = Path(path)
@@ -292,33 +307,67 @@ def box_iou(a, b):
 
     return intersection / union if union > 0 else 0
 
-def remove_duplicate_boxes(detections, threshold):
-    grouped = {}
+def box_area(box):
+    return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
 
-    for detection in detections:
-        label = detection["detector_label"]
-        grouped.setdefault(label, []).append(detection)
+def box_containment(a, b):
+    """Fraction of the smaller box that lies inside the other box."""
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    smaller = min(box_area(a), box_area(b))
+
+    return intersection / smaller if smaller > 0 else 0
+
+def remove_near_identical_boxes(detections, threshold):
+    """
+    Drop boxes that are near copies of a more confident box, whatever
+    prompt word found them. Only catches near-identical boxes, so it is
+    safe to run before SAM 2 and saves segmenting the same item many times.
+    """
+    ranked = sorted(
+        detections,
+        key=lambda x: x["detector_confidence"],
+        reverse=True
+    )
+    selected = []
+
+    for candidate in ranked:
+        if all(
+            box_iou(candidate["box"], kept["box"]) < threshold
+            for kept in selected
+        ):
+            selected.append(candidate)
+
+    return selected
+
+def remove_group_boxes(detections, containment, iou_threshold, min_items):
+    """
+    Drop boxes drawn around a whole shelf or the whole fridge: any box
+    that contains min_items or more separate smaller detections.
+    """
     final = []
-    for label, group in grouped.items():
-        group.sort(
-            key=lambda x: x["detector_confidence"],
-            reverse=True
-        )
-        selected = []
 
-        while group:
-            best = group.pop(0)
-            selected.append(best)
-            remaining = []
-            for candidate in group:
-                overlap = box_iou(
-                    best["box"],
-                    candidate["box"]
-                )
-                if overlap < threshold:
-                    remaining.append(candidate)
-            group = remaining
-        final.extend(selected)
+    for candidate in detections:
+        inside = [
+            other for other in detections
+            if other is not candidate
+            and box_area(other["box"]) < box_area(candidate["box"])
+            and box_containment(other["box"], candidate["box"]) >= containment
+        ]
+        separate_items = remove_near_identical_boxes(inside, iou_threshold)
+
+        if len(separate_items) >= min_items:
+            print(
+                f"  Removed group box: {candidate['detector_label']} "
+                f"(contains {len(separate_items)} items)"
+            )
+            continue
+
+        final.append(candidate)
+
     return final
 
 def segment_with_sam2(
@@ -386,40 +435,66 @@ def mask_iou(mask_a, mask_b):
 
     return intersection / union if union > 0 else 0
 
-def remove_duplicate_masks(detections, threshold):
-    grouped = {}
-    for detection in detections:
-        grouped.setdefault(
-            detection["detector_label"],
-            []
-        ).append(detection)
+def mask_containment(mask_a, mask_b):
+    """Fraction of the smaller mask that lies inside the other mask."""
+    smaller = min(mask_a.sum(), mask_b.sum())
+    if smaller == 0:
+        return 0
 
-    final = []
-    for label, group in grouped.items():
-        group.sort(
-            key=lambda x: (
-                x["sam_score"],
-                x["detector_confidence"]
+    return np.logical_and(mask_a, mask_b).sum() / smaller
+
+def is_duplicate(candidate, kept, box_threshold, mask_threshold, containment):
+    if box_iou(candidate["box"], kept["box"]) >= box_threshold:
+        return True
+
+    if mask_iou(candidate["mask"], kept["mask"]) >= mask_threshold:
+        return True
+
+    # e.g. the greens inside a bag, found once as the bag and once as the greens
+    if mask_containment(candidate["mask"], kept["mask"]) >= containment:
+        return True
+
+    # A tight and a loose box around the same item overlap less, but one
+    # sits inside the other and the classifier gives them the same label.
+    return (
+        candidate["predicted_label"] == kept["predicted_label"]
+        and box_containment(candidate["box"], kept["box"]) >= containment
+    )
+
+def remove_duplicate_predictions(predictions, box_threshold, mask_threshold, containment):
+    """
+    Keep one prediction per item. Runs after classification so the crop
+    the classifier is most confident about is the one that survives.
+    Sets each prediction's status to kept, duplicate or rejected.
+    """
+    accepted = sorted(
+        (p for p in predictions if p["accepted"]),
+        key=lambda x: x["classifier_confidence"],
+        reverse=True
+    )
+    kept = []
+
+    for candidate in accepted:
+        match = next(
+            (
+                existing for existing in kept
+                if is_duplicate(candidate, existing, box_threshold, mask_threshold, containment)
             ),
-            reverse=True
+            None
         )
 
-        selected = []
-        for candidate in group:
-            duplicate = False
-            for existing in selected:
-                overlap = mask_iou(
-                    candidate["mask"],
-                    existing["mask"]
-                )
+        if match is None:
+            candidate["status"] = "kept"
+            kept.append(candidate)
+        else:
+            candidate["status"] = "duplicate"
+            candidate["duplicate_of"] = match["crop_name"]
 
-                if overlap >= threshold:
-                    duplicate = True
-                    break
-            if not duplicate:
-                selected.append(candidate)
-        final.extend(selected)
-    return final
+    for prediction in predictions:
+        if not prediction["accepted"]:
+            prediction["status"] = "rejected"
+
+    return kept
 
 def prepare_crop(image, detection, crop_padding, crop_mode):
     x1, y1, x2, y2 = detection["box"]
@@ -491,15 +566,13 @@ def classify_detections(
     image_stem,
     confidence_threshold,
     crop_padding,
-    crop_mode,
-    save_all_crops
+    crop_mode
 ):
     crop_folder = (
         output_folder
         / "crops"
         / image_stem
     )
-    crop_folder.mkdir(parents=True, exist_ok=True)
     predictions = []
 
     for index, detection in enumerate(detections):
@@ -529,12 +602,6 @@ def classify_detections(
             f"{classifier_score:.2f}.jpg"
         )
 
-        if accepted or save_all_crops:
-            crop.save(
-                crop_folder / crop_name,
-                quality=95
-            )
-
         prediction = {
             "predicted_label": predicted_label,
             "classifier_confidence": classifier_score,
@@ -546,7 +613,11 @@ def classify_detections(
             "mask": detection["mask"],
             "mask_area": detection["mask_area"],
             "mask_area_ratio": detection["mask_area_ratio"],
-            "crop_path": str(crop_folder / crop_name)
+            "crop": crop,
+            "crop_name": crop_name,
+            "crop_path": str(crop_folder / crop_name),
+            "status": "",
+            "duplicate_of": ""
         }
         predictions.append(prediction)
 
@@ -564,15 +635,24 @@ def classify_detections(
 
     return predictions
 
+def save_crops(predictions, save_all_crops):
+    for prediction in predictions:
+        if prediction["status"] != "kept" and not save_all_crops:
+            continue
+
+        path = Path(prediction["crop_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        prediction["crop"].save(path, quality=95)
+
 def save_annotated_image(image, predictions, output_path):
     image_array = np.array(
         image.convert("RGB")
     ).astype(np.float32)
     overlay = image_array.copy()
 
-    # Display masks only for accepted predictions.
+    # Display masks only for kept predictions (accepted, not duplicates).
     for prediction in predictions:
-        if not prediction["accepted"]:
+        if prediction["status"] != "kept":
             continue
 
         mask = prediction["mask"]
@@ -603,7 +683,7 @@ def save_annotated_image(image, predictions, output_path):
         font = ImageFont.load_default()
 
     for prediction in predictions:
-        if not prediction["accepted"]:
+        if prediction["status"] != "kept":
             continue
 
         x1, y1, x2, y2 = prediction["box"]
@@ -666,12 +746,25 @@ def process_image(
         args.text_threshold
     )
     dino_time = time.perf_counter() - dino_start
-    box_filtered = remove_duplicate_boxes(dino_detections, args.box_nms)
-    print("\nAfter box filtering:", len(box_filtered))
+
+    if args.keep_duplicates:
+        box_filtered = dino_detections
+        group_filtered = dino_detections
+    else:
+        box_filtered = remove_near_identical_boxes(dino_detections, args.prefilter_iou)
+        print("\nAfter removing near-identical boxes:", len(box_filtered))
+        group_filtered = remove_group_boxes(
+            box_filtered,
+            args.containment,
+            args.box_nms,
+            GROUP_BOX_MIN_ITEMS
+        )
+        print("After removing group boxes:", len(group_filtered))
+
     sam_start = time.perf_counter()
     segmented = segment_with_sam2(
         image,
-        box_filtered,
+        group_filtered,
         predictor,
         args.sam_threshold,
         args.min_area,
@@ -679,26 +772,39 @@ def process_image(
     )
     sam_time = time.perf_counter() - sam_start
     print( "\nAfter SAM 2 filtering:", len(segmented))
-    mask_filtered = remove_duplicate_masks(segmented, args.mask_nms)
-    print("After mask NMS:", len(mask_filtered))
     classification_start = time.perf_counter()
     predictions = classify_detections(
         image=image,
-        detections=mask_filtered,
+        detections=segmented,
         classifier=classifier,
         label_map=label_map,
         output_folder=output_folder,
         image_stem=image_stem,
         confidence_threshold=args.classifier_threshold,
         crop_padding=args.crop_padding,
-        crop_mode=args.crop_mode,
-        save_all_crops=args.save_all_crops
+        crop_mode=args.crop_mode
     )
     classification_time = time.perf_counter() - classification_start
     accepted = [
         p for p in predictions
         if p["accepted"]
     ]
+
+    if args.keep_duplicates:
+        for prediction in predictions:
+            prediction["status"] = "kept" if prediction["accepted"] else "rejected"
+        kept = accepted
+    else:
+        kept = remove_duplicate_predictions(
+            predictions,
+            args.box_nms,
+            args.mask_nms,
+            args.containment
+        )
+    print(f"\nItems found: {len(kept)} ({len(accepted) - len(kept)} duplicates removed)")
+    for prediction in kept:
+        print(f"  {prediction['predicted_label']} ({prediction['classifier_confidence']:.1%})")
+    save_crops(predictions, args.save_all_crops)
 
     annotated_folder = output_folder / "annotated"
     annotated_folder.mkdir(
@@ -719,6 +825,8 @@ def process_image(
             "classifier_label": prediction["predicted_label"],
             "classifier_confidence": prediction["classifier_confidence"],
             "accepted": prediction["accepted"],
+            "status": prediction["status"],
+            "duplicate_of": prediction["duplicate_of"],
             "x1": x1,
             "y1": y1,
             "x2": x2,
@@ -732,10 +840,12 @@ def process_image(
         "image": image_path.name,
         "dino_detections": len(dino_detections),
         "after_box_nms": len(box_filtered),
+        "after_group_filter": len(group_filtered),
         "after_sam2": len(segmented),
-        "after_mask_nms": len(mask_filtered),
         "classified_crops": len(predictions),
         "accepted_classifications": len(accepted),
+        "items_found": len(kept),
+        "items": "; ".join(p["predicted_label"] for p in kept),
         "dino_time_seconds": round(dino_time, 3),
         "sam2_time_seconds": round(sam_time, 3),
         "classification_time_seconds": round(
@@ -809,15 +919,37 @@ def main():
     )
 
     parser.add_argument(
+        "--prefilter-iou",
+        type=float,
+        default=PREFILTER_IOU_THRESHOLD,
+        help="Before SAM 2, drop boxes overlapping a more confident box by at least this much."
+    )
+
+    parser.add_argument(
         "--box-nms",
         type=float,
-        default=BOX_NMS_THRESHOLD
+        default=BOX_NMS_THRESHOLD,
+        help="Two kept items whose boxes overlap by at least this much are the same item."
     )
 
     parser.add_argument(
         "--mask-nms",
         type=float,
-        default=MASK_NMS_THRESHOLD
+        default=MASK_NMS_THRESHOLD,
+        help="Two kept items whose SAM 2 masks overlap by at least this much are the same item."
+    )
+
+    parser.add_argument(
+        "--containment",
+        type=float,
+        default=CONTAINMENT_THRESHOLD,
+        help="A box this much inside another counts as inside it (for group boxes and same-label duplicates)."
+    )
+
+    parser.add_argument(
+        "--keep-duplicates",
+        action="store_true",
+        help="Skip duplicate filtering and keep every accepted detection (the old raw output)."
     )
 
     parser.add_argument(
@@ -862,8 +994,10 @@ def main():
         "text_threshold",
         "sam_threshold",
         "classifier_threshold",
+        "prefilter_iou",
         "box_nms",
-        "mask_nms"
+        "mask_nms",
+        "containment"
     ]:
         value = getattr(args, name)
 
@@ -969,6 +1103,8 @@ def main():
         "classifier_label",
         "classifier_confidence",
         "accepted",
+        "status",
+        "duplicate_of",
         "x1",
         "y1",
         "x2",
@@ -993,10 +1129,12 @@ def main():
         "image",
         "dino_detections",
         "after_box_nms",
+        "after_group_filter",
         "after_sam2",
-        "after_mask_nms",
         "classified_crops",
         "accepted_classifications",
+        "items_found",
+        "items",
         "dino_time_seconds",
         "sam2_time_seconds",
         "classification_time_seconds",
@@ -1023,6 +1161,10 @@ def main():
         x["accepted_classifications"]
         for x in all_summaries
     )
+    total_items = sum(
+        x["items_found"]
+        for x in all_summaries
+    )
 
     print("\n" + "=" * 65)
     print("PROCESSING COMPLETED")
@@ -1031,6 +1173,7 @@ def main():
     print("Raw DINO detections:", total_detections)
     print("Crops classified:", total_crops)
     print("Accepted classifications:", total_accepted)
+    print("Items found (after removing duplicates):", total_items)
     print("Detection results:", detection_csv)
     print("Summary:", summary_csv)
     print("Output folder:", output_folder)
