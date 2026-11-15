@@ -13,7 +13,10 @@ Tried and dropped:
 
 The export's train/valid/test splits map to train/val/test, so no crop leaks into another split.
 Roboflow's augmented copies of a photo (same name before ".rf.") are counted once.
+Crops with speckle noise baked in (about a third of FoodTypes, even in its val/test images) are skipped.
 Re-running with the same --source replaces that source's earlier crops.
+That also undoes a manual fix: after the FoodTypes import, 15 sour cream crops labeled yogurt were moved
+to "Sour Cream" and 3 non-yogurt crops (miso, cottage cheese, a yogurt butter spread) were deleted.
 """
 import argparse
 import io
@@ -23,18 +26,22 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 
-from PIL import Image, ImageOps
+import numpy as np
+from PIL import Image, ImageFilter, ImageOps
 
 DATASET_ROOT = Path("combined_dataset")
 SPLITS = {"train": "train", "valid": "val", "test": "test"}
 MIN_BOX_SIDE = 40
 MAX_CROP_SIDE = 384
 PADDING = 0.05
+# share of pixels that jump sharply from their 3x3 median; clean photos from the
+# other datasets stay under 0.00064 (99th percentile), speckled crops go well above
+NOISE_THRESHOLD = 0.001
 
 # source label (lowercase) -> one of the 86 classes; labels not listed are skipped
 COMMON = {
     "apple": "Apple", "apples": "Apple", "avocado": "Avocado", "banana": "Banana", "bananas": "Banana",
-    "beef": "Red Meat", "ground_beef": "Red Meat", "meat": "Red Meat",
+    "beef": "Red Meat", "ground_beef": "Red Meat",  # generic "meat" is mostly chicken and deli packs, so skipped
     "ham": "Bacon & Deli Meat", "bacon": "Bacon & Deli Meat", "salami": "Bacon & Deli Meat",
     "sausage": "Sausage", "chicken": "Poultry", "chicken_breast": "Poultry",
     "shrimp": "Shellfish & Seafood", "fish": "Fish",
@@ -103,6 +110,27 @@ def crop(z, path, box):
     return region
 
 
+def speckle_fraction(image):
+    gray = image.convert("L")
+    pixels = np.asarray(gray, dtype=float)
+    smoothed = np.asarray(gray.filter(ImageFilter.MedianFilter(3)), dtype=float)
+    return (np.abs(pixels - smoothed) > 80).mean()
+
+
+# crops boxes in (shuffled) order, skipping noisy ones, until cap clean crops are found
+def clean_crops(z, boxes, cap):
+    crops, noisy = [], 0
+    for path, box in boxes:
+        if len(crops) == cap:
+            break
+        region = crop(z, path, box)
+        if speckle_fraction(region) > NOISE_THRESHOLD:
+            noisy += 1
+        else:
+            crops.append(region)
+    return crops, noisy
+
+
 def main():
     parser = argparse.ArgumentParser(description="Import Roboflow COCO crops into combined_dataset/.")
     parser.add_argument("--zip", required=True, help="Roboflow COCO export zip")
@@ -118,27 +146,29 @@ def main():
     prefix = next(n for n in z.namelist() if n.endswith("train/_annotations.coco.json"))[: -len("train/_annotations.coco.json")]
     rng = random.Random(0)
     plan = {}
+    skipped = 0
     for split, target in SPLITS.items():
         cap = args.cap if target == "train" else max(1, args.cap // 6)
         for cls, boxes in load_split(z, prefix, split).items():
             rng.shuffle(boxes)
-            plan[(target, cls)] = boxes[:cap]
+            plan[(target, cls)], noisy = clean_crops(z, boxes, cap)
+            skipped += noisy
 
     for cls in sorted({c for _, c in plan}):
         counts = [len(plan.get((t, cls), [])) for t in SPLITS.values()]
         existing = len(list((DATASET_ROOT / "train" / cls).glob("*")))
         print(f"  {cls:22} +{counts[0]:4} train  +{counts[1]:3} val  +{counts[2]:3} test   (train now {existing})")
-    print(f"Total: {sum(len(v) for v in plan.values())} crops")
+    print(f"Total: {sum(len(v) for v in plan.values())} crops ({skipped} noisy crops skipped)")
     if args.dry_run:
         return
 
     for old in DATASET_ROOT.glob(f"*/*/{args.source}_*"):
         old.unlink()
-    for (target, cls), boxes in plan.items():
+    for (target, cls), crops in plan.items():
         folder = DATASET_ROOT / target / cls
         folder.mkdir(parents=True, exist_ok=True)
-        for n, (path, box) in enumerate(boxes, 1):
-            crop(z, path, box).save(folder / f"{args.source}_{target}_{n:05d}.jpg", quality=90)
+        for n, region in enumerate(crops, 1):
+            region.save(folder / f"{args.source}_{target}_{n:05d}.jpg", quality=90)
     print(f"Saved under {DATASET_ROOT}/<split>/<class>/{args.source}_*.jpg")
 
 
