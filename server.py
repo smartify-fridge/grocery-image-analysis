@@ -41,3 +41,6 @@ def analyze():
             "confidence": round(p["classifier_confidence"], 4)
         })
     return {"items": list(items.values())}
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
