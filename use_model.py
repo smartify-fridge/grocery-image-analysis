@@ -28,9 +28,9 @@ DINO_MODEL_ID = "IDEA-Research/grounding-dino-tiny"
 DETECTOR_CLASSES = "detector_prompts.json"
 CLASSIFIER_CLASSES = "trained_model/class_names.json"
 CLASSIFIER_WEIGHTS = "trained_model/combined_mobilenet.weights.h5"
-# these weights were trained on a Mac GPU, where the head's ReLU was skipped (see mobilenet.py);
-# use --head-relu for models trained after that fix
-CLASSIFIER_HEAD_RELU = False
+# weights trained after the Nov 2026 tensorflow-metal ReLU fix (see mobilenet.py);
+# use --no-head-relu for older weights trained on a Mac GPU
+CLASSIFIER_HEAD_RELU = True
 PROJECT_DIR = Path(__file__).resolve().parent
 SAM2_CONFIG = "configs/sam2.1/sam2.1_hiera_t.yaml"
 SAM2_CONFIG_FILE = (
@@ -889,9 +889,9 @@ def main():
 
     parser.add_argument(
         "--head-relu",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=CLASSIFIER_HEAD_RELU,
-        help="Use for weights trained after the tensorflow-metal ReLU fix (e.g. on the RC server)."
+        help="On by default. Use --no-head-relu for weights trained on a Mac GPU before the Nov 2026 ReLU fix."
     )
 
     parser.add_argument(

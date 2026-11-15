@@ -1,0 +1,17 @@
+image,dino_detections,after_box_nms,after_group_filter,after_sam2,classified_crops,accepted_classifications,items_found,items,dino_time_seconds,sam2_time_seconds,classification_time_seconds,annotated_image
+fridge_tina_01.jpg,20,8,8,7,7,0,0,,4.485,1.073,1.988,model_output_clean/annotated/fridge_tina_01_classified.jpg
+tina_02.jpg,22,15,15,15,15,5,5,Milk; Coconut; Cheese; Bottle; Milk,4.393,0.966,0.592,model_output_clean/annotated/tina_02_classified.jpg
+tina_03.jpg,22,10,8,8,8,5,5,Bottle; Beer; Sour Cream; Milk; Bottle,3.694,0.641,0.345,model_output_clean/annotated/tina_03_classified.jpg
+tina_04.jpg,15,7,4,4,4,2,2,Cheese; Stone Fruit,3.967,0.43,0.228,model_output_clean/annotated/tina_04_classified.jpg
+tina_05.jpg,15,7,5,2,2,0,0,,3.209,0.51,0.209,model_output_clean/annotated/tina_05_classified.jpg
+tina_06.jpg,6,2,2,2,2,2,2,Can; Bottle,3.314,0.774,0.304,model_output_clean/annotated/tina_06_classified.jpg
+tina_07.jpg,18,14,11,10,10,4,4,Eggs; Can; Bottle; Can,4.356,0.485,0.456,model_output_clean/annotated/tina_07_classified.jpg
+tina_08.jpg,26,17,16,16,16,7,7,Cabbage; Bottle; Bread; Red Meat; Milk; Bottle; Cauliflower,2.974,0.629,0.624,model_output_clean/annotated/tina_08_classified.jpg
+tina_09.jpg,32,17,16,16,16,3,2,Cabbage; Bread,3.041,0.528,0.684,model_output_clean/annotated/tina_09_classified.jpg
+tina_10.jpg,18,10,10,9,9,5,5,Milk; Eggs; Milk; Can; Cheese,3.096,0.605,0.449,model_output_clean/annotated/tina_10_classified.jpg
+tyler_friend_1_bottom_shelf.jpg,35,24,19,18,18,10,8,Strawberry; Bread; Bread; Bread; Can; Milk; Cheese; Shellfish & Seafood,3.045,0.587,0.661,model_output_clean/annotated/tyler_friend_1_bottom_shelf_classified.jpg
+tyler_friend_1_middle_shelf.jpg,41,31,25,24,24,14,12,Bread; Milk; Bottle; Shellfish & Seafood; Cheese; Beer; Bottle; Bottle; Bottle; Strawberry; Zucchini; Can,4.191,1.202,0.937,model_output_clean/annotated/tyler_friend_1_middle_shelf_classified.jpg
+tyler_friend_1_top_shelf.jpg,27,13,12,12,12,6,6,Can; Can; Can; Milk; Cucumber; Cheese,4.627,0.772,0.588,model_output_clean/annotated/tyler_friend_1_top_shelf_classified.jpg
+tyler_friend_2_bottom_shelf.jpg,14,8,6,6,6,4,4,Cheese; Fish; Milk; Shellfish & Seafood,5.866,0.666,0.37,model_output_clean/annotated/tyler_friend_2_bottom_shelf_classified.jpg
+tyler_friend_2_middle_shelf.jpg,18,13,13,13,13,5,5,Milk; Milk; Fish; Bread; Cheese,3.211,1.099,0.669,model_output_clean/annotated/tyler_friend_2_middle_shelf_classified.jpg
+tyler_friend_2_top_shelf.jpg,15,10,10,10,10,6,5,Bottle; Cheese; Bottle; Bottle; Milk,4.043,0.766,0.521,model_output_clean/annotated/tyler_friend_2_top_shelf_classified.jpg
