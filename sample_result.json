@@ -1,0 +1,36 @@
+{
+  "result_id": "sample-100",
+  "shelf_id": 1,
+  "items": [
+    {
+      "name": "Milk",
+      "category": "Dairy",
+      "confidence": 0.93
+    },
+    {
+      "name": "Apple",
+      "category": "Fruit",
+      "confidence": 0.93
+    },
+    {
+      "name": "Beef",
+      "category": "Meat",
+      "confidence": 0.93
+    },
+    {
+      "name": "Egg",
+      "category": "Other",
+      "confidence": 0.93
+    },
+    {
+      "name": "Tomato",
+      "category": "Vegetable",
+      "confidence": 0.93
+    },
+    {
+      "name": "Carrot",
+      "category": "Vegetable",
+      "confidence": 0.93
+    }
+  ]
+}
