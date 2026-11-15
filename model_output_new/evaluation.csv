@@ -1,0 +1,18 @@
+image,correct,wrong,missed,precision,recall,f1,actual,predicted
+fridge_tina_01.jpg,1,0,3,1.0,0.25,0.4,"Eggs, Poultry, Red Meat, Yogurt",Red Meat
+tina_02.jpg,0,5,7,0.0,0.0,0,"Berries, Carrot, Cheese, Eggs, Onion, Plant Milk, Yogurt","Bottle, Can, Coconut, Milk, Red Meat"
+tina_03.jpg,0,4,2,0.0,0.0,0,"Cheese, Juice","Bottle, Can, Milk, Yogurt"
+tina_04.jpg,0,2,2,0.0,0.0,0,"Apple, Grapes","Cheese, Stone Fruit"
+tina_05.jpg,0,0,1,0,0.0,0,Yogurt,(nothing)
+tina_06.jpg,0,2,1,0.0,0.0,0,Yogurt,"Bottle, Can"
+tina_07.jpg,1,2,3,0.333,0.25,0.286,"Apple, Bacon & Deli Meat, Eggs, Yogurt","Can, Eggs, Watermelon"
+tina_08.jpg,1,3,6,0.25,0.143,0.182,"Bread, Eggs, Grapes, Juice, Lettuce, Milk, Yogurt","Bottle, Bread, Cabbage, Red Meat"
+tina_09.jpg,2,2,3,0.5,0.4,0.444,"Apple, Eggs, Grapes, Milk, Yogurt","Cabbage, Eggs, Red Meat, Yogurt"
+tina_10.jpg,2,1,2,0.667,0.5,0.571,"Bread, Cheese, Eggs, Milk","Eggs, Milk, Wine"
+tyler_friend_1_bottom_shelf.jpg,1,5,1,0.167,0.5,0.25,"Beer, Can","Bread, Can, Cheese, Red Meat, Shellfish & Seafood, Strawberry"
+tyler_friend_1_middle_shelf.jpg,1,6,2,0.143,0.333,0.2,"Berries, Sausage, Strawberry","Beer, Can, Cheese, Red Meat, Shellfish & Seafood, Strawberry, Watermelon"
+tyler_friend_1_top_shelf.jpg,3,0,4,1.0,0.429,0.6,"Bread, Can, Cheese, Cucumber, Eggs, Milk, Onion","Can, Cucumber, Milk"
+tyler_friend_2_bottom_shelf.jpg,1,3,5,0.25,0.167,0.2,"Bacon & Deli Meat, Cheese, Eggs, Grapes, Poultry, Yogurt","Cheese, Fish, Milk, Shellfish & Seafood"
+tyler_friend_2_middle_shelf.jpg,2,3,2,0.4,0.5,0.444,"Cheese, Juice, Milk, Poultry","Bread, Cheese, Fish, Lettuce, Milk"
+tyler_friend_2_top_shelf.jpg,3,1,2,0.75,0.6,0.667,"Cheese, Eggs, Milk, Poultry, Yogurt","Bottle, Cheese, Eggs, Milk"
+OVERALL,18,39,46,0.316,0.281,0.298,,
