@@ -3,7 +3,8 @@ Single-image version of the use_model.py pipeline for server.py.
 Reuses use_model's steps and defaults but writes no files.
 """
 from types import SimpleNamespace
-from mobilenet import MobileNet
+# use_model must come first: it imports torch before tensorflow, and the
+# other order crashes with "option ... registered more than once" (LLVM)
 from use_model import (
     CLASSIFIER_CLASSES,
     CLASSIFIER_HEAD_RELU,
@@ -34,6 +35,7 @@ from use_model import (
     remove_near_identical_boxes,
     segment_with_sam2,
 )
+from mobilenet import MobileNet
 
 # Same defaults as the use_model.py command line flags
 DEFAULT_SETTINGS = {
